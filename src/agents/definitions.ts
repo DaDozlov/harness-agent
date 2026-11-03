@@ -1,0 +1,173 @@
+import { readdir, readFile } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import type { RunLimits } from '../core/loop.js';
+import { PERMISSION_MODES, type PermissionMode } from '../core/permissions.js';
+
+/**
+ * A named agent (docs/DESIGN.md §4.7), defined in `.heaw/agents/<name>.md` (project) or
+ * `~/.heaw/agents/<name>.md` (personal): YAML front matter, then its instructions.
+ */
+export interface AgentDefinition {
+  name: string;
+  /** When to use it; the calling agent chooses by this. */
+  description: string;
+  /** Its instructions, the body of the file. */
+  prompt: string;
+  /** `provider:model`. Default: the calling agent's model. */
+  model?: string;
+  /** Which of the calling agent's tools it may use. Default: all of them. */
+  tools?: string[];
+  /** A stricter permission mode than the caller's, e.g. `read-only`. Never a looser one. */
+  mode?: PermissionMode;
+  limits?: Partial<RunLimits>;
+  /** The file it came from. */
+  source: string;
+}
+
+export interface LoadedDefinitions<T> {
+  items: T[];
+  /** Files that could not be used, with why; heaw starts anyway. */
+  problems: string[];
+}
+
+const NAME = /^[\w-]+$/;
+
+/** Tool names in agent files written for Claude Code, so they work here unchanged. */
+const TOOL_ALIASES: Record<string, string> = {
+  Read: 'read_file',
+  Write: 'write_file',
+  Edit: 'edit_file',
+  MultiEdit: 'edit_file',
+  LS: 'list_dir',
+  Glob: 'glob',
+  Grep: 'grep',
+  Bash: 'run_command',
+  WebFetch: 'web_fetch',
+  TodoWrite: 'todo_write',
+  Task: 'delegate',
+  Skill: 'load_skill',
+};
+
+/** Splits YAML front matter (between `---` lines) from the Markdown body. */
+export function parseFrontmatter(text: string): { data: Record<string, unknown>; body: string } {
+  const content = text.codePointAt(0) === 0xfeff ? text.slice(1) : text;
+  const match = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(content);
+  if (!match) return { data: {}, body: content };
+  const data: unknown = parseYaml(match[1]!) ?? {};
+  if (typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('the front matter must be "key: value" lines');
+  }
+  return { data: data as Record<string, unknown>, body: content.slice(match[0].length) };
+}
+
+/** Personal definitions first, then the project's, which win by name. */
+export async function loadAgentDefinitions(dirs: {
+  projectRoot: string;
+  heawHome: string;
+}): Promise<LoadedDefinitions<AgentDefinition>> {
+  const problems: string[] = [];
+  const byName = new Map<string, AgentDefinition>();
+  for (const dir of [join(dirs.heawHome, 'agents'), join(dirs.projectRoot, '.heaw', 'agents')]) {
+    for (const file of await markdownFiles(dir)) {
+      try {
+        const { definition, notes } = parseAgentDefinition(await readFile(file, 'utf8'), file);
+        byName.set(definition.name, definition);
+        problems.push(...notes.map((note) => `${file}: ${note}`));
+      } catch (error) {
+        problems.push(`${file}: ${(error as Error).message}; skipped.`);
+      }
+    }
+  }
+  return { items: [...byName.values()], problems };
+}
+
+/** Reads one definition. Throws when it is unusable; `notes` are things it worked around. */
+export function parseAgentDefinition(
+  text: string,
+  source: string,
+): { definition: AgentDefinition; notes: string[] } {
+  const { data, body } = parseFrontmatter(text);
+  const notes: string[] = [];
+  const name = stringField(data, 'name') ?? basename(source, '.md');
+  if (!NAME.test(name)) throw new Error(`the name "${name}" may only use letters, digits, - and _`);
+  const description = stringField(data, 'description');
+  if (!description) {
+    throw new Error('it has no description, so no agent could know when to use it');
+  }
+
+  const model = stringField(data, 'model');
+  const usableModel = model && model !== 'inherit' && model.includes(':') ? model : undefined;
+  if (model && model !== 'inherit' && !usableModel) {
+    notes.push(`model "${model}" is not provider:model, so the calling agent's model is used.`);
+  }
+
+  const mode = stringField(data, 'mode');
+  if (mode && !PERMISSION_MODES.includes(mode as PermissionMode)) {
+    throw new Error(`mode must be one of ${PERMISSION_MODES.join(', ')}, not "${mode}"`);
+  }
+
+  const limits: Partial<RunLimits> = {};
+  for (const key of ['maxTurns', 'maxTokens', 'maxCostUsd', 'maxMinutes'] as const) {
+    const value = data[key];
+    if (value === undefined) continue;
+    if (typeof value !== 'number' || value <= 0)
+      throw new Error(`${key} must be a positive number`);
+    limits[key] = value;
+  }
+
+  const tools = toolList(data['tools']);
+  const prompt = body.trim();
+  return {
+    definition: {
+      name,
+      description,
+      prompt,
+      ...(usableModel && { model: usableModel }),
+      ...(tools && { tools }),
+      ...(mode && { mode: mode as PermissionMode }),
+      ...(Object.keys(limits).length && { limits }),
+      source,
+    },
+    notes,
+  };
+}
+
+/** `[read_file, grep]`, `read_file, grep` or Claude Code names such as `Read, Grep`. */
+function toolList(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  const names = Array.isArray(value)
+    ? value.map((item) => scalar(item) ?? '')
+    : (scalar(value)?.split(',') ?? []);
+  return [
+    ...new Set(
+      names
+        .map((name) => name.trim())
+        .filter(Boolean)
+        .map((name) => TOOL_ALIASES[name] ?? name),
+    ),
+  ];
+}
+
+function stringField(data: Record<string, unknown>, key: string): string | undefined {
+  return scalar(data[key])?.trim() || undefined;
+}
+
+/** A YAML value as text, if it is a plain one (not a list or a map). */
+function scalar(value: unknown): string | undefined {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  return undefined;
+}
+
+async function markdownFiles(dir: string): Promise<string[]> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.md'))
+      .map((entry) => join(dir, entry.name))
+      .sort();
+  } catch {
+    return [];
+  }
+}

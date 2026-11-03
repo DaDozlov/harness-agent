@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+.git
+.heaw
+.env
+.env.*
+.npmrc
+*.log
+*.tgz
+.idea
+.vscode
+.claude

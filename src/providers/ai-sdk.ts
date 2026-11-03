@@ -1,0 +1,308 @@
+import {
+  APICallError,
+  type LanguageModelV4,
+  type LanguageModelV4CallOptions,
+  type LanguageModelV4FinishReason,
+  type LanguageModelV4Prompt,
+  type LanguageModelV4ToolCall,
+  type LanguageModelV4Usage,
+} from '@ai-sdk/provider';
+import { isAbortError, ModelError } from '../core/errors.js';
+import type {
+  AssistantMessage,
+  ProviderMetadata,
+  ReasoningPart,
+  TextPart,
+  ToolCallPart,
+} from '../core/messages.js';
+import type {
+  FinishReason,
+  ModelCapabilities,
+  ModelClient,
+  ModelRequest,
+  ModelStreamEvent,
+} from '../core/model.js';
+import type { Usage } from '../core/usage.js';
+
+type ProviderOptions = NonNullable<LanguageModelV4CallOptions['providerOptions']>;
+
+/**
+ * Adapts any AI SDK provider model (OpenAI, Azure, Anthropic, Google, …) to `ModelClient`.
+ * Uses only the provider's `doStream`: one call, no tool execution, no retries. The engine
+ * owns all of that.
+ */
+export class AiSdkModelClient implements ModelClient {
+  readonly id: string;
+  readonly capabilities: ModelCapabilities;
+  readonly #model: LanguageModelV4;
+
+  constructor(id: string, model: LanguageModelV4, capabilities: ModelCapabilities) {
+    this.id = id;
+    this.#model = model;
+    this.capabilities = capabilities;
+  }
+
+  async *stream(request: ModelRequest, signal?: AbortSignal): AsyncIterable<ModelStreamEvent> {
+    const builder = new MessageBuilder();
+    let finish:
+      { finishReason: LanguageModelV4FinishReason; usage: LanguageModelV4Usage } | undefined;
+
+    try {
+      const { stream } = await this.#model.doStream(toCallOptions(request, signal));
+      for await (const part of stream) {
+        switch (part.type) {
+          case 'text-start':
+          case 'reasoning-start':
+            builder.open(kindOf(part.type), part.id, part.providerMetadata);
+            break;
+          case 'text-delta':
+          case 'reasoning-delta':
+            builder.append(kindOf(part.type), part.id, part.delta, part.providerMetadata);
+            yield part.type === 'text-delta'
+              ? { type: 'text-delta', text: part.delta }
+              : { type: 'reasoning-delta', text: part.delta };
+            break;
+          case 'text-end':
+          case 'reasoning-end':
+            builder.close(kindOf(part.type), part.id, part.providerMetadata);
+            break;
+          case 'tool-call':
+            // Provider-executed tools (e.g. built-in web search) are not used yet.
+            if (!part.providerExecuted) builder.toolCall(part);
+            break;
+          case 'finish':
+            finish = part;
+            break;
+          case 'error':
+            throw toModelError(part.error);
+          default:
+            // Tool input deltas, sources, files, metadata and raw chunks are not needed yet.
+            break;
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw error;
+      throw toModelError(error);
+    }
+
+    if (!finish) {
+      throw new ModelError('The model stream ended without a finish event.', { retryable: true });
+    }
+    yield {
+      type: 'finish',
+      message: builder.message(),
+      finishReason: mapFinishReason(finish.finishReason),
+      usage: mapUsage(finish.usage),
+    };
+  }
+}
+
+export function toCallOptions(
+  request: ModelRequest,
+  signal?: AbortSignal,
+): LanguageModelV4CallOptions {
+  const tools = request.tools?.map((tool) => ({
+    type: 'function' as const,
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+  }));
+  return {
+    prompt: toPrompt(request),
+    ...(tools?.length && { tools, toolChoice: { type: 'auto' } }),
+    ...(request.maxOutputTokens !== undefined && { maxOutputTokens: request.maxOutputTokens }),
+    ...(request.temperature !== undefined && { temperature: request.temperature }),
+    ...(request.reasoningEffort && { reasoning: request.reasoningEffort }),
+    ...(request.providerOptions && {
+      providerOptions: request.providerOptions as ProviderOptions,
+    }),
+    ...(signal && { abortSignal: signal }),
+  };
+}
+
+export function toPrompt(request: ModelRequest): LanguageModelV4Prompt {
+  const prompt: LanguageModelV4Prompt = [];
+  if (request.system) prompt.push({ role: 'system', content: request.system });
+
+  for (const message of request.messages) {
+    switch (message.role) {
+      case 'user':
+        prompt.push({
+          role: 'user',
+          content: message.content.map((part) => ({ type: 'text', text: part.text })),
+        });
+        break;
+      case 'assistant':
+        prompt.push({
+          role: 'assistant',
+          content: message.content.map((part) => {
+            const providerOptions = optionsFrom(part.providerMetadata);
+            return part.type === 'tool-call'
+              ? {
+                  type: 'tool-call',
+                  toolCallId: part.id,
+                  toolName: part.name,
+                  input: part.args,
+                  ...providerOptions,
+                }
+              : { type: part.type, text: part.text, ...providerOptions };
+          }),
+        });
+        break;
+      case 'tool':
+        prompt.push({
+          role: 'tool',
+          content: message.content.map((part) => ({
+            type: 'tool-result',
+            toolCallId: part.callId,
+            toolName: part.name,
+            output: part.isError
+              ? { type: 'error-text', value: part.output }
+              : { type: 'text', value: part.output },
+          })),
+        });
+        break;
+    }
+  }
+  return prompt;
+}
+
+/** Provider metadata from a response goes back to the same provider as provider options. */
+function optionsFrom(metadata: ProviderMetadata | undefined): {
+  providerOptions?: ProviderOptions;
+} {
+  return metadata ? { providerOptions: metadata as ProviderOptions } : {};
+}
+
+function kindOf(type: `${'text' | 'reasoning'}-${string}`): 'text' | 'reasoning' {
+  return type.startsWith('text') ? 'text' : 'reasoning';
+}
+
+/** Assembles the streamed parts into one assistant message, in the order they started. */
+class MessageBuilder {
+  readonly #parts: Array<TextPart | ReasoningPart | ToolCallPart> = [];
+  readonly #open = new Map<string, TextPart | ReasoningPart>();
+
+  open(kind: 'text' | 'reasoning', id: string, metadata: ProviderMetadata | undefined): void {
+    const part: TextPart | ReasoningPart = { type: kind, text: '' };
+    this.#parts.push(part);
+    this.#open.set(`${kind}:${id}`, part);
+    mergeMetadata(part, metadata);
+  }
+
+  append(
+    kind: 'text' | 'reasoning',
+    id: string,
+    text: string,
+    metadata: ProviderMetadata | undefined,
+  ): void {
+    if (!this.#open.has(`${kind}:${id}`)) this.open(kind, id, undefined);
+    const part = this.#open.get(`${kind}:${id}`)!;
+    part.text += text;
+    mergeMetadata(part, metadata);
+  }
+
+  close(kind: 'text' | 'reasoning', id: string, metadata: ProviderMetadata | undefined): void {
+    const part = this.#open.get(`${kind}:${id}`);
+    if (part) mergeMetadata(part, metadata);
+    this.#open.delete(`${kind}:${id}`);
+  }
+
+  toolCall(call: LanguageModelV4ToolCall): void {
+    this.#parts.push({
+      type: 'tool-call',
+      id: call.toolCallId,
+      name: call.toolName,
+      args: parseArgs(call.input),
+      ...(call.providerMetadata && { providerMetadata: call.providerMetadata }),
+    });
+  }
+
+  message(): AssistantMessage {
+    // Empty reasoning parts are kept when they carry metadata: providers such as OpenAI need
+    // the reasoning item ids back on the next call even when no reasoning text was shown.
+    const content = this.#parts.filter(
+      (part) => part.type === 'tool-call' || part.text !== '' || part.providerMetadata,
+    );
+    return { role: 'assistant', content };
+  }
+}
+
+function mergeMetadata(
+  part: TextPart | ReasoningPart,
+  metadata: ProviderMetadata | undefined,
+): void {
+  if (!metadata) return;
+  const merged: ProviderMetadata = { ...part.providerMetadata };
+  for (const [provider, values] of Object.entries(metadata)) {
+    merged[provider] = { ...merged[provider], ...values };
+  }
+  part.providerMetadata = merged;
+}
+
+/** Tool arguments arrive as JSON text. Invalid JSON is kept as a string for validation to reject. */
+function parseArgs(input: string): unknown {
+  if (input.trim() === '') return {};
+  try {
+    return JSON.parse(input) as unknown;
+  } catch {
+    return input;
+  }
+}
+
+function mapFinishReason(reason: LanguageModelV4FinishReason): FinishReason {
+  switch (reason.unified) {
+    case 'stop':
+    case 'length':
+    case 'tool-calls':
+    case 'content-filter':
+    case 'interrupted':
+      return reason.unified;
+    default:
+      return 'other';
+  }
+}
+
+function mapUsage(usage: LanguageModelV4Usage): Usage {
+  return {
+    inputTokens: usage.inputTokens.total ?? 0,
+    outputTokens: usage.outputTokens.total ?? 0,
+    reasoningTokens: usage.outputTokens.reasoning ?? 0,
+    cacheReadTokens: usage.inputTokens.cacheRead ?? 0,
+    cacheWriteTokens: usage.inputTokens.cacheWrite ?? 0,
+  };
+}
+
+export function toModelError(error: unknown): ModelError {
+  if (error instanceof ModelError) return error;
+  if (APICallError.isInstance(error)) {
+    const retryAfterMs = retryAfter(error.responseHeaders);
+    return new ModelError(error.message, {
+      retryable: error.isRetryable,
+      ...(error.statusCode !== undefined && { status: error.statusCode }),
+      ...(retryAfterMs !== undefined && { retryAfterMs }),
+      cause: error,
+    });
+  }
+  return new ModelError(describe(error), { retryable: false, cause: error });
+}
+
+function retryAfter(headers: Record<string, string> | undefined): number | undefined {
+  if (!headers) return undefined;
+  const ms = Number(headers['retry-after-ms']);
+  if (Number.isFinite(ms) && ms >= 0) return ms;
+  const value = headers['retry-after'];
+  if (value === undefined) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
+}
+
+function describe(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    return String(error.message);
+  }
+  return typeof error === 'string' ? error : JSON.stringify(error);
+}

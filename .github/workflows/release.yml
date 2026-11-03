@@ -1,0 +1,50 @@
+# Releases with changesets: changes on main with changesets open a "Version Packages" pull
+# request; merging it publishes the new version to npm.
+#
+# Publishing uses npm trusted publishing (OIDC), so no npm token is stored here. To switch it on,
+# once, after the first manual publish:
+#   1. npmjs.com → package settings → Trusted publishing → GitHub Actions: this repository and
+#      the workflow file release.yml.
+#   2. GitHub → Settings → Actions → General: allow GitHub Actions to create pull requests.
+#   3. GitHub → Settings → Secrets and variables → Actions → Variables: RELEASE_ENABLED = true.
+# Until then the job is skipped, so pushes do not fail on a release that cannot work yet.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency: release-${{ github.ref }}
+
+permissions:
+  contents: write # the version commit and tag
+  pull-requests: write # the "Version Packages" pull request
+  id-token: write # npm trusted publishing
+
+jobs:
+  release:
+    if: vars.RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Node 24 comes with npm 11, which publishes with OIDC (npm 11.5.1 or later).
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # changesets/action writes an .npmrc that expects NPM_TOKEN when none exists, which keeps
+      # npm from using OIDC. An empty one avoids that.
+      - run: touch ~/.npmrc
+
+      - uses: changesets/action@v1
+        with:
+          version: npx changeset version
+          publish: npm run release
+          title: Version Packages
+          commit: 'chore: version packages'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

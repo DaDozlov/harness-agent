@@ -1,0 +1,20 @@
+description: A small feature with tests, following the project's conventions.
+fixture: ./fixtures/stats
+# The fixture's bug is fixed first, so this case measures the feature alone.
+setup: node -e "const f='src/stats.js';const fs=require('fs');fs.writeFileSync(f,fs.readFileSync(f,'utf8').replace('values.length + 1','values.length'))"
+prompt: >-
+  Add median(values) to src/stats.js: the middle value of the sorted numbers, or the mean of the
+  two middle ones for an even count. It throws a RangeError for an empty array, like average().
+  It must not change the array it gets. Add tests.
+trials: 3
+limits:
+  maxTurns: 30
+  maxCostUsd: 1
+checks:
+  - command: npm test
+    expectExitCode: 0
+  - file: src/stats.js
+    contains: export function median
+  - judge: >-
+      median() sorts a copy (the input array is not changed), handles odd and even counts and
+      throws a RangeError for an empty array; test/ has tests for all of these.

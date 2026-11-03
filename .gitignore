@@ -1,0 +1,25 @@
+node_modules/
+dist/
+coverage/
+*.log
+*.tgz
+*.tsbuildinfo
+.eslintcache
+
+# Secrets
+.env
+.env.*
+!.env.example
+.npmrc
+
+# heaw's own state when using heaw in this repo
+.heaw/sessions/
+.heaw/evals/
+.heaw/memory.md
+
+# OS, editors and local tool settings
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/settings.local.json
