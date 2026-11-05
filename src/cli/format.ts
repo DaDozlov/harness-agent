@@ -4,9 +4,19 @@ export function toolLabel(tool: string, args: unknown): string {
   const text = (key: string) => (typeof record[key] === 'string' ? record[key] : undefined);
   if (tool === 'delegate')
     return `delegate ${text('agent') ?? 'agent'}: ${short(text('task') ?? '')}`;
+  if (tool === 'finish_plan') return 'building the plan in PLAN.md';
+  if (tool === 'start_plan') return `start_plan: ${short(text('reason') ?? '')}`;
   if (tool === 'load_skill') {
     const file = text('file');
     return `load_skill ${text('name') ?? ''}${file ? ` (${file})` : ''}`;
+  }
+  if (tool === 'run_command' && record.background === true) {
+    return `run_command in the background: ${short(text('command') ?? '')}`;
+  }
+  if (tool === 'command_output' || tool === 'stop_command') {
+    const id = typeof record.id === 'number' ? ` [${record.id}]` : '';
+    const until = text('wait_for');
+    return `${tool}${id}${until ? `, waiting for "${short(until)}"` : ''}`;
   }
   const detail = ['command', 'pattern', 'path', 'url'].map(text).find(Boolean);
   return detail === undefined ? tool : `${tool} ${short(detail)}`;

@@ -46,6 +46,8 @@ export interface PermissionSummary {
   preapproved: string[];
   /** Calls the user allowed "for this session". */
   sessionApprovals: number;
+  /** Commands the user allowed by prefix "for this session", as rules. */
+  sessionRules: string[];
 }
 
 /** A permission rule could not be parsed. */
@@ -84,7 +86,7 @@ interface Rule {
 /**
  * Decides allow / ask / deny for each tool call (docs/DESIGN.md §4.10).
  * Order: deny rules, approvals (given for this session, or in advance), protected paths, ask
- * rules, allow rules, mode default.
+ * rules, commands allowed by prefix for this session, allow rules, mode default.
  *
  * Rules are `tool` or `tool(pattern)`. `*` in the tool name matches any characters. The pattern
  * is a glob for path subjects (`src/**`, `**\/.env*`) and a wildcard text match for everything
@@ -97,6 +99,8 @@ export class PermissionPolicy {
   readonly #allow: Rule[];
   readonly #preapproved: Rule[];
   readonly #sessionApprovals = new Set<string>();
+  /** Command prefixes allowed for the session, by tool. */
+  readonly #sessionCommands: Array<{ tool: string; prefix: string }> = [];
 
   constructor(rules: PermissionRules = {}) {
     this.setMode(rules.mode ?? 'default');
@@ -106,7 +110,10 @@ export class PermissionPolicy {
     this.#preapproved = (rules.preapproved ?? []).map(parseRule);
   }
 
-  check(tool: { name: string; kind: ToolKind }, subject: Subject | undefined): PermissionCheck {
+  check(
+    tool: { name: string; kind: ToolKind; alwaysAsk?: boolean | undefined },
+    subject: Subject | undefined,
+  ): PermissionCheck {
     const deny = this.#deny.find((rule) => matches(rule, tool.name, subject));
     if (deny) return { decision: 'deny', reason: `it matches the deny rule "${deny.source}"` };
 
@@ -128,8 +135,20 @@ export class PermissionPolicy {
       };
     }
 
+    if (tool.alwaysAsk) return { decision: 'ask', reason: 'it always needs your approval' };
+
     const ask = this.#ask.find((rule) => matches(rule, tool.name, subject));
     if (ask) return { decision: 'ask', reason: `it matches the ask rule "${ask.source}"` };
+
+    const granted = this.#sessionCommands.find(
+      (grant) => grant.tool === tool.name && coversCommand(grant.prefix, subject),
+    );
+    if (granted) {
+      return {
+        decision: 'allow',
+        reason: `the user allowed commands starting with "${granted.prefix}" for this session`,
+      };
+    }
 
     const allow = this.#allow.find((rule) => matches(rule, tool.name, subject));
     if (allow) return { decision: 'allow', reason: `it matches the allow rule "${allow.source}"` };
@@ -165,12 +184,49 @@ export class PermissionPolicy {
       deny: sources(this.#deny),
       preapproved: sources(this.#preapproved),
       sessionApprovals: this.#sessionApprovals.size,
+      sessionRules: this.#sessionCommands.map(({ tool, prefix }) => `${tool}(${prefix}*)`),
     };
   }
 
   /** Allows this exact call (tool and subject) for the rest of the session. */
   allowForSession(toolName: string, subject: Subject | undefined): void {
     this.#sessionApprovals.add(approvalKey(toolName, subject));
+  }
+
+  /**
+   * What "yes for the session" allows for a call the user is asked about, in words for the
+   * prompt: allowing only the exact call would ask again for every new file and every variant of
+   * a command (a test run with another filter).
+   */
+  describeSessionGrant(tool: { name: string; kind: ToolKind }, subject: Subject | undefined) {
+    const grant = this.#sessionGrant(tool, subject);
+    if (grant === 'edits') return 'allow all file edits for this session (accept-edits mode)';
+    if (grant) return `allow commands starting with "${grant.prefix}" for this session`;
+    return 'allow this exact call for the rest of the session';
+  }
+
+  /**
+   * "Yes for the session": allows the call itself, and more where that is safe to say (see
+   * `describeSessionGrant`): file edits switch `default` mode to `accept-edits` (protected files
+   * are still asked about), commands are allowed by their leading words. Ask rules still ask.
+   */
+  approveForSession(tool: { name: string; kind: ToolKind }, subject: Subject | undefined): void {
+    const grant = this.#sessionGrant(tool, subject);
+    this.allowForSession(tool.name, subject);
+    if (grant === 'edits') this.setMode('accept-edits');
+    else if (grant) this.#sessionCommands.push({ tool: tool.name, prefix: grant.prefix });
+  }
+
+  #sessionGrant(
+    tool: { name: string; kind: ToolKind },
+    subject: Subject | undefined,
+  ): 'edits' | { prefix: string } | undefined {
+    if (tool.kind === 'write') {
+      return this.#mode === 'default' && !protectedPath(tool, subject) ? 'edits' : undefined;
+    }
+    if (tool.kind !== 'execute' || subject?.type !== 'text') return undefined;
+    const prefix = commandPrefix(subject.value);
+    return prefix === undefined ? undefined : { prefix };
   }
 
   /** The allow rules that apply to a tool, so a denied model can see what it may do instead. */
@@ -207,7 +263,10 @@ class RestrictedPolicy extends PermissionPolicy {
     return this.#mode ?? this.#base.mode;
   }
 
-  override check(tool: { name: string; kind: ToolKind }, subject: Subject | undefined) {
+  override check(
+    tool: { name: string; kind: ToolKind; alwaysAsk?: boolean | undefined },
+    subject: Subject | undefined,
+  ) {
     const base = this.#base.check(tool, subject);
     const own = super.check(tool, subject);
     return STRICTNESS[own.decision] > STRICTNESS[base.decision] ? own : base;
@@ -215,6 +274,20 @@ class RestrictedPolicy extends PermissionPolicy {
 
   override allowForSession(toolName: string, subject: Subject | undefined): void {
     this.#base.allowForSession(toolName, subject);
+  }
+
+  override describeSessionGrant(
+    tool: { name: string; kind: ToolKind },
+    subject: Subject | undefined,
+  ): string {
+    return this.#base.describeSessionGrant(tool, subject);
+  }
+
+  override approveForSession(
+    tool: { name: string; kind: ToolKind },
+    subject: Subject | undefined,
+  ): void {
+    this.#base.approveForSession(tool, subject);
   }
 
   override allowRulesFor(toolName: string): string[] {
@@ -235,6 +308,47 @@ function protectedPath(tool: { kind: ToolKind }, subject: Subject | undefined) {
 /** A rule that would allow exactly this call, to suggest to the user. */
 export function suggestRule(toolName: string, subject: Subject | undefined): string {
   return subject ? `${toolName}(${subject.value})` : toolName;
+}
+
+/** Chaining, redirection and substitution: a command with any of these is only allowed exactly. */
+const SHELL_SYNTAX = /[;&|<>`\r\n]|\$\(/;
+
+/** Programs that run arbitrary code or destroy things: never allowed by prefix. */
+const EXACT_ONLY = new Set([
+  ...['bash', 'sh', 'zsh', 'fish', 'cmd', 'powershell', 'pwsh', 'env', 'sudo', 'su', 'xargs'],
+  ...['eval', 'exec', 'nohup', 'timeout', 'time', 'watch', 'start', 'ssh', 'scp', 'curl', 'wget'],
+  ...['python', 'python3', 'py', 'node', 'deno', 'bun', 'ruby', 'perl', 'php', 'java'],
+  ...['docker', 'podman', 'kubectl', 'rm', 'rmdir', 'del', 'erase', 'rd', 'mv', 'move', 'dd'],
+  ...['chmod', 'chown', 'kill', 'pkill', 'killall', 'taskkill', 'shutdown', 'reboot', 'format'],
+]);
+
+/**
+ * The leading words of a command that "yes for the session" allows: the program and up to two
+ * more words that are subcommands or simple flags (`./mvnw -q test`, `npm run build`, `git
+ * status`). None for commands with shell syntax or programs that can run anything.
+ */
+export function commandPrefix(command: string): string | undefined {
+  const text = command.trim();
+  if (!text || SHELL_SYNTAX.test(text)) return undefined;
+  const [program = '', ...rest] = text.split(/\s+/);
+  const name = program
+    .replace(/^.*[/\\]/, '')
+    .replace(/\.(exe|cmd|bat|ps1)$/i, '')
+    .toLowerCase();
+  if (EXACT_ONLY.has(name)) return undefined;
+  const words = [program];
+  for (const word of rest.slice(0, 2)) {
+    if (!/^(-{1,2})?[a-z][\w:.-]*$/i.test(word)) break;
+    words.push(word);
+  }
+  return words.join(' ');
+}
+
+/** A prefix covers the command itself and the command with more arguments, nothing chained. */
+function coversCommand(prefix: string, subject: Subject | undefined): boolean {
+  if (subject?.type !== 'text' || SHELL_SYNTAX.test(subject.value)) return false;
+  const command = subject.value.trim();
+  return command === prefix || command.startsWith(`${prefix} `);
 }
 
 function approvalKey(toolName: string, subject: Subject | undefined): string {

@@ -1,5 +1,6 @@
 import type { Tool } from '../core/tools.js';
 import { FS_TOOLS } from './fs.js';
+import { PLAN_TOOLS } from './plan.js';
 import { SHELL_TOOLS } from './shell.js';
 import { TODO_TOOLS } from './todo.js';
 import { WEB_TOOLS } from './web.js';
@@ -10,6 +11,7 @@ export const TOOLSETS = {
   shell: SHELL_TOOLS,
   web: WEB_TOOLS,
   todo: TODO_TOOLS,
+  plan: PLAN_TOOLS,
   // These depend on settings and the engine (http.apis, the MCP manager, agent definitions,
   // skills, the workspace's memory file), so the engine adds them.
   http: [],
@@ -26,6 +28,7 @@ export const DEFAULT_TOOLSETS: ToolsetName[] = [
   'shell',
   'web',
   'todo',
+  'plan',
   'http',
   'mcp',
   'agents',

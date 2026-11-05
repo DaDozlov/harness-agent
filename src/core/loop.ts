@@ -20,6 +20,9 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxDelayMs: 60_000,
 };
 
+/** A `beforeStop` check that fails the same way this often in a row ends the run. */
+export const MAX_SAME_CHECK_FAILURES = 3;
+
 /** Limits per run, i.e. per user input (docs/DESIGN.md §4.1). */
 export interface RunLimits {
   /** Model turns. */
@@ -58,8 +61,10 @@ export interface LoopOptions {
   compactAt: number | false;
   /** What the session is for, stamped on `run.start`. */
   intent?: string | undefined;
+  /** Sent with every model call; read per call, so it can change between runs. */
+  reasoningEffort?: (() => 'low' | 'medium' | 'high' | undefined) | undefined;
   /** Before the stop hooks: a reason to keep working, e.g. changes nothing has checked. */
-  stopCheck?: (() => string | undefined) | undefined;
+  stopCheck?: (() => Promise<string | undefined> | string | undefined) | undefined;
   /** Events to add before `run.end`, e.g. links to the commits the run made. */
   beforeEnd?: (() => Promise<EngineEventBody[]>) | undefined;
 }
@@ -94,6 +99,9 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
   let usage = emptyUsage();
   let costUsd: number | undefined;
   let turns = 0;
+  // The last check failure, to notice the agent going round in circles.
+  let lastFailure: string | undefined;
+  let sameFailures = 0;
 
   function* account(callUsage: Usage): Generator<EngineEvent> {
     usage = addUsage(usage, callUsage);
@@ -240,9 +248,9 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         const reason = stopReasonFor(outcome.finishReason);
         if (reason !== 'end_turn') return reason;
         // Verification point: a hook can send the agent back to work.
-        const reminder = options.stopCheck?.();
+        const reminder = await options.stopCheck?.();
         if (reminder) {
-          yield stamp({ type: 'hook', hook: 'beforeStop', message: reminder });
+          yield stamp({ type: 'hook', hook: 'beforeStop', message: reminder, builtIn: true });
           addMessage(userMessage(reminder));
           continue;
         }
@@ -251,6 +259,11 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         yield* reported(verdict.failures);
         if (!verdict.feedback) return 'end_turn';
         yield stamp({ type: 'hook', hook: 'beforeStop', message: verdict.feedback });
+        const failure = failureKey(verdict.feedback);
+        sameFailures = failure === lastFailure ? sameFailures + 1 : 1;
+        lastFailure = failure;
+        // Stuck, or the check cannot run here (a missing tool): only a person can help now.
+        if (sameFailures >= MAX_SAME_CHECK_FAILURES) return 'check_failed';
         addMessage(userMessage(`A check before finishing reported:\n\n${verdict.feedback}`));
         continue;
       }
@@ -285,6 +298,20 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
   return { stopReason, usage, turns, ...cost };
 }
 
+/**
+ * A check's output without what changes on every run (timestamps, durations), so the same
+ * failure looks the same. Counts stay: "4 tests failed" after "5 tests failed" is progress.
+ */
+export function failureKey(feedback: string): string {
+  return feedback
+    .replace(/\d{4}-\d\d-\d\d[T ][\d:.]+(Z|[+-]\d\d:?\d\d)?/g, '<time>')
+    .replace(/\b\d\d?:\d\d(:\d\d(\.\d+)?)?\b/g, '<time>')
+    .replace(/\d+(\.\d+)?\s?(ms|s|sec|seconds|m|min)\b/g, '<duration>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(-2_000);
+}
+
 /** The request for the next turn. Tools are read per turn: MCP servers come and go. */
 function buildRequest(options: LoopOptions): ModelRequest {
   const tools: ToolSpec[] = [...options.tools.tools().values()].map((tool) => ({
@@ -292,10 +319,12 @@ function buildRequest(options: LoopOptions): ModelRequest {
     description: tool.description,
     inputSchema: tool.inputSchema,
   }));
+  const effort = options.reasoningEffort?.();
   return {
     system: options.system(),
     messages: [...options.messages],
     ...(tools.length && { tools }),
+    ...(effort && { reasoningEffort: effort }),
   };
 }
 

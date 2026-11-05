@@ -10,13 +10,12 @@ import { PromptInput } from './PromptInput.js';
 
 export type ApprovalRequestEvent = Extract<EngineEvent, { type: 'approval.request' }>;
 
+/** "a": what it allows depends on the call (`forSession`), e.g. all file edits. */
+const SESSION_LABEL = 'Yes, and allow this exact call for the rest of the session';
+
 const OPTIONS = [
   { key: 'y', label: 'Yes', decision: { allow: true, scope: 'once' } },
-  {
-    key: 'a',
-    label: 'Yes, and allow this exact call for the rest of the session',
-    decision: { allow: true, scope: 'session' },
-  },
+  { key: 'a', label: SESSION_LABEL, decision: { allow: true, scope: 'session' } },
   { key: 'n', label: 'No', decision: { allow: false } },
   { key: 'f', label: 'No, and tell heaw what to do instead', decision: undefined },
 ] as const satisfies ReadonlyArray<{
@@ -108,7 +107,10 @@ export function ApprovalPrompt({
       ) : (
         OPTIONS.map((option, index) => (
           <Text key={option.key} color={index === selected ? 'cyan' : undefined}>
-            {index === selected ? glyphs.pointer : ' '} {index + 1}. {option.label}{' '}
+            {index === selected ? glyphs.pointer : ' '} {index + 1}.{' '}
+            {option.key === 'a' && request.forSession
+              ? `Yes, and ${request.forSession}`
+              : option.label}{' '}
             <Text dimColor>({option.key})</Text>
           </Text>
         ))

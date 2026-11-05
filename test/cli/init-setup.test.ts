@@ -45,7 +45,10 @@ describe('heaw init', () => {
     });
     expect(config).toMatchObject({
       model: 'azure:gpt-5.4',
-      permissions: { mode: 'default', deny: ['read_file(**/.env*)'] },
+      permissions: {
+        mode: 'default',
+        deny: ['read_file(**/.env)', 'read_file(**/.env.!(example))'],
+      },
     });
   });
 

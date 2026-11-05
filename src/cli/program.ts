@@ -295,7 +295,7 @@ function withAgentOptions(command: Command): Command {
         .default([], 'none'),
     )
     .addOption(
-      new Option('--deny <rule>', 'deny matching actions, e.g. "read_file(**/.env*)" (repeatable)')
+      new Option('--deny <rule>', 'deny matching actions, e.g. "read_file(**/.env)" (repeatable)')
         .argParser(collect)
         .default([], 'none'),
     )

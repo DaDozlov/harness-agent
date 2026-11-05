@@ -7,6 +7,8 @@ import { MODE_COLORS } from '../theme.js';
 export interface StatusBarProps {
   model: string;
   mode: PermissionMode;
+  /** Plan mode (/plan) is on: shown instead of the mode. */
+  plan?: boolean;
   usage: Usage;
   /** Hidden while unknown. */
   costUsd?: number | undefined;
@@ -22,6 +24,7 @@ export interface StatusBarProps {
 export function StatusBar({
   model,
   mode,
+  plan = false,
   usage,
   costUsd,
   context,
@@ -40,7 +43,8 @@ export function StatusBar({
   return (
     <Box justifyContent="space-between" paddingX={1}>
       <Text dimColor>
-        {model} · <Text color={MODE_COLORS[mode]}>{mode}</Text>
+        {model} ·{' '}
+        {plan ? <Text color="magenta">plan</Text> : <Text color={MODE_COLORS[mode]}>{mode}</Text>}
         <Text dimColor>
           {' '}
           · {formatTokens(tokens)} tokens{costUsd === undefined ? '' : ` · ${formatCost(costUsd)}`}

@@ -17,6 +17,8 @@ export interface Skill {
   dir: string;
   /** How the agent should refer to the folder: relative to the workspace when inside it. */
   shownDir: string;
+  /** A skill built into heaw: its instructions, with no folder or files. */
+  content?: string;
 }
 
 const SKILL_FILE = 'SKILL.md';
@@ -112,6 +114,10 @@ export function loadSkillTool(skills: readonly Skill[]): Tool {
       if (!skill) {
         const names = skills.map((candidate) => candidate.name).join(', ') || 'none';
         return { output: `There is no skill named "${name}". Skills: ${names}.`, isError: true };
+      }
+      if (skill.content !== undefined) {
+        if (file !== undefined) return { output: `The skill ${name} has no files.`, isError: true };
+        return `# Skill: ${skill.name}\n\n${skill.content.trim()}`;
       }
       if (file !== undefined) return readSkillFile(skill, file);
       const { body } = parseFrontmatter(await readFile(join(skill.dir, SKILL_FILE), 'utf8'));

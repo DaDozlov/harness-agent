@@ -339,8 +339,12 @@ describe('createEngine with tools', () => {
       'glob',
       'grep',
       'run_command',
+      'command_output',
+      'stop_command',
       'web_fetch',
       'todo_write',
+      'start_plan',
+      'finish_plan',
       'delegate',
       'remember',
     ]);

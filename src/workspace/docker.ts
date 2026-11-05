@@ -164,6 +164,7 @@ export class DockerWorkspace implements Workspace {
       return await capture(child, {
         timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         signal: options.signal,
+        onOutput: options.onOutput,
         stop: () => this.#stop(container, entry),
         startError: (error) => cliProblem(this.#cli, error),
       });
@@ -176,8 +177,9 @@ export class DockerWorkspace implements Workspace {
   async dispose(): Promise<void> {
     this.#disposed = true;
     const container = await this.#container?.catch(() => undefined);
-    for (const entry of this.#running) killTree(entry.child);
+    const stopping = [...this.#running].map((entry) => killTree(entry.child));
     this.#running.clear();
+    await Promise.all(stopping);
     if (container) await this.#remove(container.id);
   }
 
@@ -246,7 +248,7 @@ export class DockerWorkspace implements Workspace {
       stdio: 'ignore',
       windowsHide: true,
     }).on('error', () => undefined);
-    setTimeout(() => killTree(entry.child), 3_000).unref();
+    setTimeout(() => void killTree(entry.child), 3_000).unref();
   }
 
   /** Containers that an earlier heaw for this project left behind, e.g. after a crash. */
@@ -456,7 +458,7 @@ function run(
     const stderr = new OutputBuffer(1_000_000);
     child.stdout.setEncoding('utf8').on('data', (text: string) => stdout.append(text));
     child.stderr.setEncoding('utf8').on('data', (text: string) => stderr.append(text));
-    const timer = setTimeout(() => killTree(child), options.timeoutMs);
+    const timer = setTimeout(() => void killTree(child), options.timeoutMs);
     child.on('error', (error) => {
       clearTimeout(timer);
       reject(new Error(cliProblem(file, error)));

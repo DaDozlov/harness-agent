@@ -15,7 +15,7 @@ import {
 const engine = await createEngine({
   model: process.env.HEAW_MODEL ?? 'azure:gpt-5.4',
   // Reading needs no approval in the default mode; edits and commands are asked about.
-  permissions: { mode: 'default', deny: ['read_file(**/.env*)'] },
+  permissions: { mode: 'default', deny: ['read_file(**/.env)', 'read_file(**/.env.!(example))'] },
   limits: { maxTurns: 50, maxCostUsd: 2 },
 });
 const session = engine.session();

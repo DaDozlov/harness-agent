@@ -55,13 +55,40 @@ export const DEFAULT_SYSTEM_PROMPT =
   "You are heaw, an AI agent running in the user's terminal. Answer clearly and concisely. " +
   'If you are not sure about something, say so instead of guessing.';
 
+/** How the agent plans: in plan mode when it has start_plan, in the conversation otherwise. */
+const PLAN_GUIDANCE = {
+  tool:
+    '- Before building anything bigger than a few files or with real design choices, call ' +
+    'start_plan and plan it properly; the user approves the plan before you build. Small, clear ' +
+    'tasks need no plan: just do them.',
+  talk:
+    '- Plan before building anything bigger than a few files or with real design choices: say ' +
+    'briefly what you will build and how, ask only the questions whose answers change the ' +
+    'design, and wait for the go (when nobody can answer, write the plan down and follow it). ' +
+    'Small, clear tasks need no plan.',
+};
+
+function toolGuidance(canPlan: boolean): string {
+  return TOOL_GUIDANCE.replace('{plan}', canPlan ? PLAN_GUIDANCE.tool : PLAN_GUIDANCE.talk);
+}
+
 const TOOL_GUIDANCE = [
   'You can read and change files and run commands in the working directory with your tools.',
   '- Look before you act: find and read the relevant files before changing them.',
   '- Before running project commands such as tests or builds, check how this project runs ' +
     'them (package.json scripts, Makefile, pyproject.toml, README).',
   '- Change existing files with edit_file; use write_file for new files or full rewrites.',
+  '{plan}',
+  '- Build in small steps: first a minimal version that builds and has one passing test, then ' +
+    'one piece at a time, running the checks after each step rather than only at the end.',
+  '- Carry a task through to the end in one go: do not stop between steps to report progress ' +
+    'or to ask whether to continue. Stop early only for what only the user can give: a ' +
+    'decision, access, a missing tool.',
+  '- Check that results are right, not only that the code runs: compare outputs with what you ' +
+    'expect (values, counts, the errors that should be found).',
   "- Verify your work, for example by running the project's tests, before saying it is done.",
+  '- When a check cannot run because something is missing from the environment (a tool, a ' +
+    'runtime, a service), stop and tell the user what is needed; do not fake or work around it.',
   "- Some actions need the user's approval. If one is denied, do not retry it unchanged: " +
     'adjust your approach or ask the user.',
 ].join('\n');
@@ -147,6 +174,8 @@ export interface EngineOptions {
    * to check its work. Default: true, unless a `beforeStop` hook is configured (which checks).
    */
   verifyChanges?: boolean;
+  /** How hard models that reason think. Default: the provider's (usually medium). */
+  reasoningEffort?: 'low' | 'medium' | 'high';
 }
 
 export interface RunAgentOptions {
@@ -193,6 +222,11 @@ export interface Engine {
   session(): Session;
   /** Continues a saved conversation, by id or a unique prefix of one. Needs a session store. */
   resume(idOrPrefix: string): Promise<Session>;
+  /**
+   * Continues a conversation of another engine in this one, e.g. after the config changed
+   * (`/reload`): same id and history, this engine's settings.
+   */
+  continueSession(previous: Session): Session;
   /** Saved sessions, most recent first. Empty without a session store. */
   sessions(limit?: number): Promise<SessionSummary[]>;
   /** Creates another model client with the engine's credentials, e.g. to switch models. */
@@ -370,7 +404,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     const environment = environmentBlock(id);
     const header = [
       options.system ?? DEFAULT_SYSTEM_PROMPT,
-      ...(tools.length ? [TOOL_GUIDANCE] : []),
+      ...(tools.length ? [toolGuidance(tools.some((tool) => tool.name === 'start_plan'))] : []),
       ...(interactive === false ? [ONE_SHOT_GUIDANCE] : []),
       ...(instructions ? [instructions] : []),
       ...(definition ? [definition.prompt] : []),
@@ -395,6 +429,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       // An agent a hook started runs only tool hooks, and cannot start more this way.
       hooks: setup.forHook ? subagentHooks : hooks,
       ...(!setup.forHook && { runAgent: hookRunAgent, remindToVerify }),
+      ...(options.reasoningEffort && { reasoningEffort: options.reasoningEffort }),
       compactAt: options.compactAt,
       store,
       id,
@@ -421,7 +456,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     const header = [
       spec.definition?.prompt || spec.instructions || DEFAULT_SUBAGENT_PROMPT,
       subagentGuidance(spec.name),
-      ...(spec.tools.length ? [TOOL_GUIDANCE] : []),
+      ...(spec.tools.length ? [toolGuidance(false)] : []),
       ...(instructions ? [instructions] : []),
     ];
     return new Session({
@@ -443,6 +478,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       requestApproval: spec.parent.requestApproval,
       limits: spec.limits,
       hooks: subagentHooks,
+      ...(options.reasoningEffort && { reasoningEffort: options.reasoningEffort }),
       compactAt: options.compactAt,
       // Same conversation: events and saved outputs stay with the parent's session.
       id: spec.parent.hookContext(spec.signal).sessionId,
@@ -542,6 +578,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       await session.flush();
       return result;
     },
+    continueSession: (previous) => newSession({ restored: previous.snapshot() }),
     async resume(idOrPrefix) {
       if (!store) throw new Error('Resuming needs a session store (EngineOptions.sessionStore).');
       const id = await store.resolve(idOrPrefix);

@@ -59,6 +59,8 @@ export interface ExecOptions {
   /** Stop the command after this long. Default: 120 000 ms. */
   timeoutMs?: number | undefined;
   signal?: AbortSignal | undefined;
+  /** Gets the output as it comes, e.g. of a command running in the background. */
+  onOutput?: ((text: string) => void) | undefined;
 }
 
 export interface ExecResult {

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { bypassNotice } from '../../src/cli/chat/commands.js';
@@ -23,17 +24,32 @@ afterEach(async () => {
   await Promise.all(workspaces.splice(0).map((workspace) => workspace.dispose()));
 });
 
-function docker(args: string[]): Promise<{ ok: boolean; stdout: string }> {
+function docker(args: string[], timeout = 300_000): Promise<{ ok: boolean; stdout: string }> {
   return new Promise((done) => {
-    execFile('docker', args, { timeout: 300_000, windowsHide: true }, (error, stdout) =>
+    execFile('docker', args, { timeout, windowsHide: true }, (error, stdout) =>
       done({ ok: !error, stdout: stdout.trim() }),
     );
   });
 }
 
-/** Integration tests need a Docker engine that runs Linux containers (CI on Linux, Docker Desktop). */
-const dockerReady = (await docker(['info', '--format', '{{.OSType}}'])).stdout === 'linux';
 const IMAGE = 'alpine:3.20';
+
+/**
+ * Integration tests need a Docker engine that runs Linux containers with a mounted folder (CI on
+ * Linux, Docker Desktop). Docker Desktop can stall on mounts while still answering `docker info`;
+ * then every test would hang until its timeout, so the probe starts a real container.
+ */
+async function dockerWorks(): Promise<boolean> {
+  if ((await docker(['info', '--format', '{{.OSType}}'], 30_000)).stdout !== 'linux') return false;
+  const dir = await mkdtemp(join(tmpdir(), 'heaw-docker-probe-'));
+  const probe = await docker(['run', '--rm', '--volume', `${dir}:/probe`, IMAGE, 'true'], 60_000);
+  await rm(dir, { recursive: true, force: true });
+  if (!probe.ok)
+    console.warn('Skipping the Docker tests: a container with a mounted folder did not start.');
+  return probe.ok;
+}
+
+const dockerReady = await dockerWorks();
 
 describe('the Docker workspace, without Docker', () => {
   it('builds the docker run arguments', () => {

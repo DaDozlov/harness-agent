@@ -345,3 +345,37 @@ describe('lastLinesThatFit', () => {
     expect(lastLinesThatFit('\u001b[31mred\u001b[39m', 2, 3)).toBe('\u001b[31mred\u001b[39m');
   });
 });
+
+describe('repeated text and heaw reminders', () => {
+  it('shows a final answer that repeats an earlier text of the same message once', () => {
+    const items = itemsFromHistory([
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Step 1 is done.' },
+          { type: 'text', text: 'Step 1 is done.' },
+          { type: 'text', text: 'Step 2 is next.' },
+        ],
+      },
+    ]);
+    expect(items.map((item) => ('text' in item ? item.text : ''))).toEqual([
+      'Step 1 is done.',
+      'Step 2 is next.',
+    ]);
+  });
+
+  it("shows heaw's own reminder as such, not as a failed check", () => {
+    const state = run(
+      event({
+        type: 'hook',
+        hook: 'beforeStop',
+        message: 'PLAN.md still has 2 open steps; the next is: 2. Core',
+        builtIn: true,
+      }),
+    );
+    expect(state.items.at(-1)).toMatchObject({
+      kind: 'notice',
+      text: 'Not done yet, so the agent goes on: PLAN.md still has 2 open steps; the next is: 2. Core',
+    });
+  });
+});

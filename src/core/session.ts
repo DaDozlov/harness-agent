@@ -19,7 +19,8 @@ import {
 } from './loop.js';
 import type { Message } from './messages.js';
 import type { ModelClient, ToolSpec } from './model.js';
-import { PermissionPolicy, type PermissionRules } from './permissions.js';
+import { type PermissionMode, PermissionPolicy, type PermissionRules } from './permissions.js';
+import { completedTodos, PLAN_FILE, readPlanSteps } from './plan.js';
 import {
   createSessionId,
   type SessionHeader,
@@ -33,11 +34,26 @@ import { addUsage, costOf, emptyUsage, type Usage } from './usage.js';
 import { type UsageBreakdown, UsageStats } from './usage-stats.js';
 import type { Workspace } from './workspace.js';
 
+export { PLAN_FILE };
+
 export const DEFAULT_MAX_TURNS = 100;
 /** Compact when a request would use more than this share of the usable context window. */
 export const DEFAULT_COMPACT_AT = 0.8;
 
-const NOTHING_TO_CHECK = /(^|\/)\.heaw\/|\.(md|mdx|txt)$/i;
+/**
+ * Notes, docs and files no check covers (`.gitignore`, `.env.example`, …), and heaw's own files:
+ * its config and MCP servers are checked by check_config.
+ */
+const NOTHING_TO_CHECK = new RegExp(
+  [
+    String.raw`(^|/)\.heaw/`,
+    String.raw`(^|/)heaw\.config\.[cm]?[jt]s$`,
+    String.raw`(^|/)\.(mcp\.json|gitignore|gitattributes|dockerignore|editorconfig|env\.example)$`,
+    String.raw`(^|/)LICENSE[^/]*$`,
+    String.raw`\.(md|mdx|txt)$`,
+  ].join('|'),
+  'i',
+);
 
 const SKIPPED_EVENTS = new Set<EngineEvent['type']>([
   'text.delta',
@@ -110,6 +126,8 @@ export interface SessionOptions {
    * to check its work before it finishes (for projects without a `beforeStop` hook of their own).
    */
   remindToVerify?: boolean | undefined;
+  /** How hard the model thinks, for models that reason. Default: the provider's. */
+  reasoningEffort?: 'low' | 'medium' | 'high' | undefined;
 }
 
 export interface SendOptions {
@@ -164,8 +182,18 @@ export class Session {
   #ranCommands = false;
   readonly #stats: UsageStats;
   readonly #remindToVerify: boolean;
+  #reasoningEffort: 'low' | 'medium' | 'high' | undefined;
+  /** In plan mode: the mode and effort to go back to. */
+  #planSaved: { mode: PermissionMode; effort: 'low' | 'medium' | 'high' | undefined } | undefined;
   /** The current run was reminded already: once per run is enough. */
   #reminded = false;
+  /** Building an approved plan: a run that stops with steps open is sent back (#planReminder). */
+  #building = false;
+  /** The plan was approved during the current run, or before it (`/plan go`). */
+  #buildApproved = false;
+  /** Steps done when the run started, and when the agent was last sent back to the plan. */
+  #stepsAtStart = 0;
+  #nudgedAt: number | undefined;
   #model: ModelClient;
   #usage: Usage;
   #costUsd: number | undefined;
@@ -208,6 +236,7 @@ export class Session {
     this.#trackGit = options.trackGit ?? false;
     this.#stats = options.stats ?? new UsageStats();
     this.#remindToVerify = options.remindToVerify ?? false;
+    this.#reasoningEffort = options.reasoningEffort;
     this.#observe = options.observe;
     this.#retry = { ...DEFAULT_RETRY_POLICY, ...options.retry };
     this.permissions =
@@ -257,6 +286,15 @@ export class Session {
         hooks: this.#hooks,
         hookContext: (signal) => this.#hookContext(signal),
         changes: this.#changes,
+        // Only the user's agent plans; a sub-agent switching its parent's mode would surprise.
+        ...((options.depth ?? 0) === 0 && {
+          plan: {
+            active: () => session.inPlanMode,
+            enter: () => session.enterPlanMode(),
+            leave: () => session.leavePlanMode(),
+            build: () => session.buildPlan(),
+          },
+        }),
         // Only stamps: what a tool stamps it then emits, and `record` saves it once.
         stamp: (body) => this.#event(body),
         // Sub-agent events are saved in this session's log, deltas excepted.
@@ -266,6 +304,26 @@ export class Session {
           this.#observe?.(event);
         },
       },
+    };
+  }
+
+  /**
+   * What another session needs to continue this conversation, e.g. one of an engine rebuilt from
+   * a changed config (`/reload`): same id, history, usage and cost. File changes stay behind.
+   */
+  snapshot(): {
+    id: string;
+    history: Message[];
+    usage: Usage;
+    costUsd?: number;
+    stats: UsageStats;
+  } {
+    return {
+      id: this.id,
+      history: [...this.messages],
+      usage: this.#usage,
+      ...(this.#costUsd !== undefined && { costUsd: this.#costUsd }),
+      stats: this.#stats,
     };
   }
 
@@ -312,6 +370,66 @@ export class Session {
     return this.#running;
   }
 
+  /** Plan mode: read-only except `PLAN.md`, with high reasoning effort. */
+  get inPlanMode(): boolean {
+    return this.#planSaved !== undefined;
+  }
+
+  /**
+   * Enters plan mode (`/plan`, or the agent with `start_plan`): the agent can read everything
+   * and write only `PLAN.md`, and thinks harder. Takes effect from the next tool call or model
+   * call, so it can start in the middle of a run.
+   */
+  enterPlanMode(): void {
+    this.#planSaved ??= { mode: this.permissions.mode, effort: this.#reasoningEffort };
+    this.#building = false;
+    this.permissions.setMode('read-only');
+    for (const tool of ['write_file', 'edit_file']) {
+      this.permissions.allowForSession(tool, { value: PLAN_FILE, type: 'path' });
+    }
+    this.#reasoningEffort = 'high';
+  }
+
+  /** Back to the mode and effort from before plan mode; false when it was off. */
+  leavePlanMode(): boolean {
+    const saved = this.#planSaved;
+    if (!saved) return false;
+    this.permissions.setMode(saved.mode);
+    this.#reasoningEffort = saved.effort;
+    this.#planSaved = undefined;
+    return true;
+  }
+
+  /**
+   * The user approved `PLAN.md` (`finish_plan`, `/plan go`): until its steps are all ticked, a
+   * run that made progress on it and stops is sent back once to go on with the next step.
+   */
+  buildPlan(): void {
+    this.#building = true;
+    this.#buildApproved = true;
+  }
+
+  /** Continues another session's plan mode or plan build, e.g. after `/reload`. */
+  continuePlan(previous: Session): void {
+    if (previous.inPlanMode) this.enterPlanMode();
+    else this.#building = previous.buildingPlan;
+  }
+
+  /** Whether the session is building an approved plan that still has open steps. */
+  get buildingPlan(): boolean {
+    return this.#building;
+  }
+
+  /** How hard the model thinks; undefined: the provider's default. */
+  get reasoningEffort(): 'low' | 'medium' | 'high' | undefined {
+    return this.#reasoningEffort;
+  }
+
+  /** Changes how hard the model thinks from the next model call on, e.g. high for planning. */
+  setReasoningEffort(effort: 'low' | 'medium' | 'high' | undefined): void {
+    this.#reasoningEffort = effort;
+  }
+
   /** Switches the model for the next runs; the history stays. */
   setModel(model: ModelClient): void {
     this.#model = model;
@@ -331,6 +449,8 @@ export class Session {
       const started = Date.now();
       this.#ranCommands = false;
       this.#reminded = false;
+      this.#nudgedAt = undefined;
+      this.#stepsAtStart = this.#building ? await this.#planProgress() : 0;
       const notes = this.#notes.splice(0).map(
         (note) => `[${note}]
 
@@ -355,7 +475,8 @@ export class Session {
         compactAt: this.#compactAt,
         intent: this.#intent,
         beforeEnd: () => this.#commitLinks(base, started),
-        stopCheck: () => this.#verifyReminder(),
+        stopCheck: async () => this.#verifyReminder() ?? (await this.#planReminder()),
+        reasoningEffort: () => this.#reasoningEffort,
       });
       this.#usage = addUsage(this.#usage, result.usage);
       if (result.costUsd !== undefined) this.#costUsd = (this.#costUsd ?? 0) + result.costUsd;
@@ -376,7 +497,13 @@ export class Session {
       return result;
     } finally {
       this.#running = false;
+      this.#buildApproved = false;
     }
+  }
+
+  /** Tells the model something with the next input, e.g. that heaw stopped its commands. */
+  tell(note: string): void {
+    this.#notes.push(note);
   }
 
   /** Runs whose file tools changed files, oldest first; what `rewind` can undo. */
@@ -582,6 +709,40 @@ export class Session {
       'Before you finish, verify your work the way this project does (its tests, type check, ' +
       'linter or build) and fix what fails. If it cannot be checked, say so in your answer.'
     );
+  }
+
+  /**
+   * Models tend to stop after each step of a plan to report and ask whether to go on, though the
+   * user approved the whole plan. A run that started the build or ticked a step and then stops
+   * with steps still open is sent back once per step; an agent that stops again without
+   * progress is waiting for the user on purpose, and is left alone. Progress is ticked steps,
+   * and completed todo items: models track steps in either.
+   */
+  async #planReminder(): Promise<string | undefined> {
+    if (!this.#building) return undefined;
+    const steps = await readPlanSteps(this.#workspace);
+    if (!steps?.open.length) {
+      this.#building = false;
+      return undefined;
+    }
+    const progress = await this.#planProgress();
+    const progressed = progress > this.#stepsAtStart;
+    if ((!progressed && !this.#buildApproved) || this.#nudgedAt === progress) return undefined;
+    this.#nudgedAt = progress;
+    const count = steps.open.length;
+    return (
+      `${PLAN_FILE} still has ${count} open step${count === 1 ? '' : 's'}; the next is: ` +
+      `${steps.open[0]} Tick each step in ${PLAN_FILE} as soon as it is done (it is how the user ` +
+      'follows the build). The user approved the whole plan, so go on with it now, step after ' +
+      'step, without asking whether to continue. Stop only when a step shows the plan is wrong ' +
+      'or you need something only the user can give; then say so in a sentence or two.'
+    );
+  }
+
+  /** Ticked steps of the plan plus completed todo items. */
+  async #planProgress(): Promise<number> {
+    const steps = await readPlanSteps(this.#workspace);
+    return (steps?.done ?? 0) + completedTodos(this.#tools.state);
   }
 
   /**

@@ -26,16 +26,21 @@ export function capture(
     stop: () => void;
     /** What to say when the process cannot even start. */
     startError: (error: Error) => string;
+    onOutput?: ((text: string) => void) | undefined;
   },
 ): Promise<ExecResult> {
   const started = Date.now();
-  const { signal } = options;
+  const { signal, onOutput } = options;
   return new Promise((resolveResult) => {
     const output = new OutputBuffer(MAX_CAPTURE_CHARS);
     const stdout = new StringDecoder('utf8');
     const stderr = new StringDecoder('utf8');
-    child.stdout?.on('data', (chunk: Buffer) => output.append(stdout.write(chunk)));
-    child.stderr?.on('data', (chunk: Buffer) => output.append(stderr.write(chunk)));
+    const append = (text: string) => {
+      output.append(text);
+      if (text) onOutput?.(stripAnsi(text));
+    };
+    child.stdout?.on('data', (chunk: Buffer) => append(stdout.write(chunk)));
+    child.stderr?.on('data', (chunk: Buffer) => append(stderr.write(chunk)));
 
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -51,11 +56,11 @@ export function capture(
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
-      output.append(stdout.end());
-      output.append(stderr.end());
+      append(stdout.end());
+      append(stderr.end());
       resolveResult({
         exitCode: timedOut || signal?.aborted ? null : exitCode,
-        output: stripAnsi(output.text),
+        output: collapseProgress(stripAnsi(output.text)),
         timedOut,
         durationMs: Date.now() - started,
       });
@@ -87,6 +92,26 @@ export class OutputBuffer {
       this.#full = true;
     }
   }
+}
+
+/**
+ * Output as a terminal shows it: progress bars redraw their line after a carriage return, which
+ * in captured output repeats the line hundreds of times (Maven downloads, npm installs) and only
+ * costs the model tokens. Each line keeps its last version.
+ */
+export function collapseProgress(text: string): string {
+  if (!text.includes('\r')) return text;
+  return text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => {
+      const versions = line.split('\r');
+      for (let index = versions.length - 1; index > 0; index--) {
+        if (versions[index]!.trim()) return versions[index]!;
+      }
+      return versions[0]!;
+    })
+    .join('\n');
 }
 
 /** Removes terminal color and cursor codes that some tools print even with NO_COLOR. */

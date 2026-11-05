@@ -178,6 +178,7 @@ async function* authorize(
     args,
     subject: subject?.value,
     reason: check.reason,
+    forSession: runtime.permissions.describeSessionGrant(tool, subject),
   };
   // Register the request before announcing it: a consumer may answer as soon as it sees the event.
   const answer = runtime.requestApproval(request, signal);
@@ -196,7 +197,7 @@ async function* authorize(
     const feedback = decision.feedback ? ` Their feedback: ${decision.feedback}` : '';
     return { finished: denied(`The user denied this action.${feedback}`) };
   }
-  if (decision.scope === 'session') runtime.permissions.allowForSession(tool.name, subject);
+  if (decision.scope === 'session') runtime.permissions.approveForSession(tool, subject);
   return approved;
 }
 

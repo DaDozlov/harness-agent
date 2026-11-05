@@ -35,6 +35,8 @@ export class AiSdkModelClient implements ModelClient {
   readonly id: string;
   readonly capabilities: ModelCapabilities;
   readonly #model: LanguageModelV4;
+  /** The provider lost an item the history referred to: from then on, it goes inline. */
+  #inline = false;
 
   constructor(id: string, model: LanguageModelV4, capabilities: ModelCapabilities) {
     this.id = id;
@@ -42,29 +44,59 @@ export class AiSdkModelClient implements ModelClient {
     this.capabilities = capabilities;
   }
 
+  /**
+   * OpenAI and Azure keep the items of a conversation (reasoning, tool calls, answers), and the
+   * history refers to them by id. A stored item can expire or go missing ("Item with id 'rs_…'
+   * not found"), which fails every later request; the call is then made again, and all later
+   * ones, with the history sent inline: earlier reasoning is left out, the rest is kept.
+   */
   async *stream(request: ModelRequest, signal?: AbortSignal): AsyncIterable<ModelStreamEvent> {
+    let started = false;
+    try {
+      for await (const event of this.#streamOnce(request, signal)) {
+        started = true;
+        yield event;
+      }
+    } catch (error) {
+      if (started || this.#inline || !isMissingItem(error)) throw error;
+      this.#inline = true;
+      yield* this.#streamOnce(request, signal);
+    }
+  }
+
+  async *#streamOnce(
+    request: ModelRequest,
+    signal: AbortSignal | undefined,
+  ): AsyncIterable<ModelStreamEvent> {
     const builder = new MessageBuilder();
+    const repeats = new RepeatFilter();
     let finish:
       { finishReason: LanguageModelV4FinishReason; usage: LanguageModelV4Usage } | undefined;
 
     try {
-      const { stream } = await this.#model.doStream(toCallOptions(request, signal));
+      const { stream } = await this.#model.doStream(
+        toCallOptions(request, signal, { inline: this.#inline }),
+      );
       for await (const part of stream) {
         switch (part.type) {
           case 'text-start':
           case 'reasoning-start':
             builder.open(kindOf(part.type), part.id, part.providerMetadata);
             break;
-          case 'text-delta':
+          case 'text-delta': {
+            builder.append('text', part.id, part.delta, part.providerMetadata);
+            const shown = repeats.delta(part.id, part.delta);
+            if (shown) yield { type: 'text-delta', text: shown };
+            break;
+          }
           case 'reasoning-delta':
-            builder.append(kindOf(part.type), part.id, part.delta, part.providerMetadata);
-            yield part.type === 'text-delta'
-              ? { type: 'text-delta', text: part.delta }
-              : { type: 'reasoning-delta', text: part.delta };
+            builder.append('reasoning', part.id, part.delta, part.providerMetadata);
+            yield { type: 'reasoning-delta', text: part.delta };
             break;
           case 'text-end':
           case 'reasoning-end':
             builder.close(kindOf(part.type), part.id, part.providerMetadata);
+            if (part.type === 'text-end') repeats.end(part.id);
             break;
           case 'tool-call':
             // Provider-executed tools (e.g. built-in web search) are not used yet.
@@ -100,6 +132,7 @@ export class AiSdkModelClient implements ModelClient {
 export function toCallOptions(
   request: ModelRequest,
   signal?: AbortSignal,
+  options: { inline?: boolean } = {},
 ): LanguageModelV4CallOptions {
   const tools = request.tools?.map((tool) => ({
     type: 'function' as const,
@@ -108,7 +141,7 @@ export function toCallOptions(
     inputSchema: tool.inputSchema,
   }));
   return {
-    prompt: toPrompt(request),
+    prompt: toPrompt(request, options),
     ...(tools?.length && { tools, toolChoice: { type: 'auto' } }),
     ...(request.maxOutputTokens !== undefined && { maxOutputTokens: request.maxOutputTokens }),
     ...(request.temperature !== undefined && { temperature: request.temperature }),
@@ -120,7 +153,11 @@ export function toCallOptions(
   };
 }
 
-export function toPrompt(request: ModelRequest): LanguageModelV4Prompt {
+/** `inline`: without the ids of stored items, so nothing refers to items the provider keeps. */
+export function toPrompt(
+  request: ModelRequest,
+  options: { inline?: boolean } = {},
+): LanguageModelV4Prompt {
   const prompt: LanguageModelV4Prompt = [];
   if (request.system) prompt.push({ role: 'system', content: request.system });
 
@@ -136,7 +173,7 @@ export function toPrompt(request: ModelRequest): LanguageModelV4Prompt {
         prompt.push({
           role: 'assistant',
           content: message.content.map((part) => {
-            const providerOptions = optionsFrom(part.providerMetadata);
+            const providerOptions = optionsFrom(part.providerMetadata, options.inline);
             return part.type === 'tool-call'
               ? {
                   type: 'tool-call',
@@ -168,10 +205,28 @@ export function toPrompt(request: ModelRequest): LanguageModelV4Prompt {
 }
 
 /** Provider metadata from a response goes back to the same provider as provider options. */
-function optionsFrom(metadata: ProviderMetadata | undefined): {
-  providerOptions?: ProviderOptions;
-} {
-  return metadata ? { providerOptions: metadata as ProviderOptions } : {};
+function optionsFrom(
+  metadata: ProviderMetadata | undefined,
+  inline = false,
+): { providerOptions?: ProviderOptions } {
+  if (!metadata) return {};
+  if (!inline) return { providerOptions: metadata as ProviderOptions };
+  const withoutIds = Object.fromEntries(
+    Object.entries(metadata).map(([provider, values]) => [
+      provider,
+      Object.fromEntries(Object.entries(values).filter(([key]) => key !== 'itemId')),
+    ]),
+  );
+  return { providerOptions: withoutIds as ProviderOptions };
+}
+
+/** The provider no longer has an item the request refers to. */
+function isMissingItem(error: unknown): boolean {
+  return (
+    error instanceof ModelError &&
+    error.status === 400 &&
+    /item with id '[^']*' not found/i.test(error.message)
+  );
 }
 
 function kindOf(type: `${'text' | 'reasoning'}-${string}`): 'text' | 'reasoning' {
@@ -225,6 +280,35 @@ class MessageBuilder {
       (part) => part.type === 'tool-call' || part.text !== '' || part.providerMetadata,
     );
     return { role: 'assistant', content };
+  }
+}
+
+/**
+ * Some models (GPT-5 with message phases) repeat a progress message word for word as the final
+ * answer of the same response. The history keeps both, as the provider needs them; the user is
+ * shown the text once. A later text part is held back while it only repeats an earlier one.
+ */
+export class RepeatFilter {
+  readonly #ended: string[] = [];
+  readonly #open = new Map<string, { text: string; shown: boolean }>();
+
+  /** What to show of a text delta: nothing, the delta, or the held-back text plus the delta. */
+  delta(id: string, text: string): string {
+    let part = this.#open.get(id);
+    if (!part) this.#open.set(id, (part = { text: '', shown: !this.#ended.length }));
+    part.text += text;
+    if (part.shown) return text;
+    const current = part.text;
+    if (this.#ended.some((earlier) => earlier.startsWith(current))) return '';
+    part.shown = true;
+    return current;
+  }
+
+  end(id: string): void {
+    const part = this.#open.get(id);
+    if (!part) return;
+    this.#ended.push(part.text);
+    this.#open.delete(id);
   }
 }
 

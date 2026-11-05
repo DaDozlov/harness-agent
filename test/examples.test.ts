@@ -40,7 +40,11 @@ describe('examples', () => {
     expect(options.agents?.map((agent) => [agent.name, agent.mode])).toEqual([
       ['reviewer', 'read-only'],
     ]);
-    expect(options.skills?.map((skill) => skill.name)).toEqual(['implement-story']);
+    expect(options.skills?.map((skill) => skill.name)).toEqual([
+      'setup-harness',
+      'plan-work',
+      'implement-story',
+    ]);
     expect(options.permissions?.deny).toContain('mcp__github__merge_pull_request');
     expect(options.instructions?.map((file) => file.source)).toEqual(['AGENTS.md']);
   });

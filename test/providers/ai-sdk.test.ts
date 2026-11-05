@@ -7,7 +7,12 @@ import {
 } from '@ai-sdk/provider';
 import { describe, expect, it } from 'vitest';
 import type { ModelRequest, ModelStreamEvent } from '../../src/core/model.js';
-import { AiSdkModelClient, toCallOptions, toPrompt } from '../../src/providers/ai-sdk.js';
+import {
+  AiSdkModelClient,
+  RepeatFilter,
+  toCallOptions,
+  toPrompt,
+} from '../../src/providers/ai-sdk.js';
 import { DEFAULT_CAPABILITIES } from '../../src/providers/catalog.js';
 
 const USAGE: LanguageModelV4Usage = {
@@ -290,5 +295,111 @@ describe('toCallOptions', () => {
 
     expect(options).not.toHaveProperty('tools');
     expect(options).not.toHaveProperty('toolChoice');
+  });
+});
+
+describe('a final answer that repeats a progress message', () => {
+  const text = (id: string, delta: string, phase: string): LanguageModelV4StreamPart[] => [
+    { type: 'text-start', id, providerMetadata: { azure: { phase } } },
+    { type: 'text-delta', id, delta: delta.slice(0, 6) },
+    { type: 'text-delta', id, delta: delta.slice(6) },
+    { type: 'text-end', id },
+  ];
+
+  it('is shown once, and kept twice in the history', async () => {
+    const { client } = fakeModel(() => [
+      ...text('a', 'Step 1 is done.', 'commentary'),
+      ...text('b', 'Step 1 is done.', 'final_answer'),
+      FINISH_STOP,
+    ]);
+
+    const events = await collect(client.stream(REQUEST));
+
+    const shown = events.flatMap((event) => (event.type === 'text-delta' ? [event.text] : []));
+    expect(shown.join('')).toBe('Step 1 is done.');
+    const finish = events.at(-1);
+    expect(finish?.type === 'finish' && finish.message.content.map((part) => part.type)).toEqual([
+      'text',
+      'text',
+    ]);
+  });
+
+  it('shows a later text that only starts the same way in full', () => {
+    const filter = new RepeatFilter();
+    filter.delta('a', 'Step 1 is done.');
+    filter.end('a');
+
+    expect(filter.delta('b', 'Step 1 ')).toBe('');
+    expect(filter.delta('b', 'and 2 are done.')).toBe('Step 1 and 2 are done.');
+    expect(filter.delta('b', ' Next: 3.')).toBe(' Next: 3.');
+  });
+});
+
+describe('a stored item the provider lost', () => {
+  const history: ModelRequest = {
+    system: 'Be brief.',
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Build it' }] },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: '', providerMetadata: { azure: { itemId: 'rs_1' } } },
+          {
+            type: 'tool-call',
+            id: 'call_1',
+            name: 'read_file',
+            args: { path: 'a.ts' },
+            providerMetadata: { azure: { itemId: 'fc_1' } },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        content: [{ type: 'tool-result', callId: 'call_1', name: 'read_file', output: 'x' }],
+      },
+    ],
+  };
+
+  it('makes the call again, and every later one, with the history inline', async () => {
+    let calls = 0;
+    const { client, calls: options } = fakeModel(() => {
+      if (calls++ === 0) {
+        throw new APICallError({
+          message: "Item with id 'rs_1' not found.",
+          url: 'https://example.com',
+          requestBodyValues: {},
+          statusCode: 400,
+          isRetryable: false,
+        });
+      }
+      return [
+        { type: 'text-start', id: 't' },
+        { type: 'text-delta', id: 't', delta: 'ok' },
+        { type: 'text-end', id: 't' },
+        FINISH_STOP,
+      ];
+    });
+
+    const first = await collect(client.stream(history));
+    await collect(client.stream(history));
+
+    expect(first.at(-1)?.type).toBe('finish');
+    const ids = (call: LanguageModelV4CallOptions) =>
+      JSON.stringify(call.prompt).match(/"itemId"/g)?.length ?? 0;
+    expect(options.map(ids)).toEqual([2, 0, 0]);
+  });
+
+  it('does not hide other errors', async () => {
+    const { client } = fakeModel(() => {
+      throw new APICallError({
+        message: 'Invalid schema',
+        url: 'https://example.com',
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+      });
+    });
+
+    await expect(collect(client.stream(history))).rejects.toMatchObject({ status: 400 });
   });
 });

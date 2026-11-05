@@ -6,6 +6,7 @@ import type { Session } from '../../core/session.js';
 import type { Engine } from '../../engine.js';
 import { VERSION } from '../../version.js';
 import { type CommandContext, matchCommands, runSlashCommand } from './commands.js';
+import { type EngineFactory, reloadChat } from './reload.js';
 import { type ApprovalRequestEvent, ApprovalPrompt } from './components/ApprovalPrompt.js';
 import { ItemView } from './components/ItemView.js';
 import { PromptInput } from './components/PromptInput.js';
@@ -35,6 +36,12 @@ export interface AppProps {
   resumed?: boolean;
   /** Called whenever the chat switches to another session (e.g. /clear). */
   onSessionChange?: (session: Session) => void;
+  /** Builds an engine from the config files as they are now, for `/reload`. */
+  reloadEngine?: EngineFactory;
+  /** Setup files changed since the last load: applied before the next message, and after a run. */
+  setupChanges?: () => Promise<string[]>;
+  /** Called when `/reload` replaced the engine. */
+  onEngineChange?: (engine: Engine) => void;
 }
 
 /** The interactive chat (docs/DESIGN.md §4.15): one consumer of the engine's event stream. */
@@ -46,10 +53,21 @@ export function App(props: AppProps) {
   );
 }
 
-function ChatApp({ engine, session: initialSession, resumed = false, onSessionChange }: AppProps) {
+function ChatApp({
+  engine: initialEngine,
+  session: initialSession,
+  resumed = false,
+  onSessionChange,
+  reloadEngine,
+  setupChanges,
+  onEngineChange,
+}: AppProps) {
   const { exit } = useApp();
   const sessionRef = useRef(initialSession);
   const [session, setSession] = useState(initialSession);
+  // `/reload` replaces the engine.
+  const engineRef = useRef(initialEngine);
+  const [engine, setEngine] = useState(initialEngine);
   const [transcript, dispatch] = useReducer(transcriptReducer, undefined, () =>
     createTranscript(
       initialSession.usage,
@@ -87,31 +105,76 @@ function ChatApp({ engine, session: initialSession, resumed = false, onSessionCh
     exit();
   }, [exit]);
 
-  const send = useCallback(async (text: string) => {
-    const current = sessionRef.current;
-    dispatch({ type: 'user', text });
-    const controller = new AbortController();
-    abortRef.current = controller;
-    runningRef.current = true;
-    setRunning(true);
+  const switchSession = useCallback(
+    (next: Session) => {
+      sessionRef.current = next;
+      setSession(next);
+      onSessionChange?.(next);
+      dispatch({ type: 'usage', usage: next.usage, costUsd: next.costUsd });
+    },
+    [onSessionChange],
+  );
+
+  const reload = useCallback(async () => {
+    if (!reloadEngine) throw new Error('Reloading is not available here; restart heaw instead.');
+    const result = await reloadChat(
+      { engine: engineRef.current, session: sessionRef.current },
+      reloadEngine,
+    );
+    engineRef.current = result.engine;
+    setEngine(result.engine);
+    onEngineChange?.(result.engine);
+    switchSession(result.session);
+    return result.text;
+  }, [reloadEngine, onEngineChange, switchSession]);
+
+  /** Applies setup files that changed (by the agent, or in an editor) since they were loaded. */
+  const applySetupChanges = useCallback(async () => {
+    const changed = reloadEngine && setupChanges ? await setupChanges() : [];
+    if (!changed.length) return;
+    const files = changed.join(', ');
     try {
-      for await (const event of current.send(text, { signal: controller.signal })) {
-        dispatch({ type: 'event', event });
-        if (event.type === 'approval.request') setApproval(event);
-      }
+      print(`${files} changed, so heaw applied the setup again.\n${await reload()}`);
     } catch (error) {
-      dispatch({
-        type: 'notice',
-        tone: 'error',
-        text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    } finally {
-      abortRef.current = undefined;
-      runningRef.current = false;
-      setApproval(undefined);
-      setRunning(false);
+      print(
+        `${files} changed, but the setup does not load: ` +
+          `${error instanceof Error ? error.message : String(error)}\n` +
+          'heaw keeps the previous setup. Fix it, then type /reload.',
+        'warning',
+      );
     }
-  }, []);
+  }, [reload, reloadEngine, setupChanges, print]);
+
+  const send = useCallback(
+    async (text: string, show = true) => {
+      if (show) dispatch({ type: 'user', text });
+      runningRef.current = true;
+      setRunning(true);
+      try {
+        await applySetupChanges();
+        const controller = new AbortController();
+        abortRef.current = controller;
+        for await (const event of sessionRef.current.send(text, { signal: controller.signal })) {
+          dispatch({ type: 'event', event });
+          if (event.type === 'approval.request') setApproval(event);
+        }
+      } catch (error) {
+        dispatch({
+          type: 'notice',
+          tone: 'error',
+          text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      } finally {
+        abortRef.current = undefined;
+        setApproval(undefined);
+        // What the run changed, e.g. the config /setup wrote, applies from the next message on.
+        await applySetupChanges();
+        runningRef.current = false;
+        setRunning(false);
+      }
+    },
+    [applySetupChanges],
+  );
 
   const commandContext = useMemo<CommandContext>(
     () => ({
@@ -120,14 +183,13 @@ function ChatApp({ engine, session: initialSession, resumed = false, onSessionCh
       print,
       refresh,
       exit: quit,
+      send: (text) => void send(text, false),
+      ...(reloadEngine && { reload }),
       newSession: () => {
         const previous = sessionRef.current;
         const next = engine.session();
         next.permissions.setMode(previous.permissions.mode);
-        sessionRef.current = next;
-        setSession(next);
-        onSessionChange?.(next);
-        dispatch({ type: 'usage', usage: next.usage, costUsd: next.costUsd });
+        switchSession(next);
         print(`New conversation (session ${next.id}). The previous one is saved.`);
         // Runs its sessionEnd hooks.
         void previous.close().then((failures) => {
@@ -137,7 +199,7 @@ function ChatApp({ engine, session: initialSession, resumed = false, onSessionCh
         });
       },
     }),
-    [engine, print, quit, onSessionChange],
+    [engine, print, quit, send, switchSession, reload, reloadEngine],
   );
 
   const onEnter = () => {
@@ -275,6 +337,7 @@ function ChatApp({ engine, session: initialSession, resumed = false, onSessionCh
       <StatusBar
         model={session.model.id}
         mode={session.permissions.mode}
+        plan={session.inPlanMode}
         usage={transcript.usage}
         costUsd={transcript.costUsd}
         context={session.contextUsage()}

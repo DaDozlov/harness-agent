@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { commandOutput, startInBackground, stopCommand } from './background.js';
 import { defineTool } from './define.js';
 
 const DEFAULT_TIMEOUT_SECONDS = 120;
@@ -9,9 +10,11 @@ export const runCommand = defineTool({
   description:
     'Run a shell command and return its output (stdout and stderr together) and exit code. ' +
     'The shell is named in the environment block. Commands cannot read input, so avoid ' +
-    'interactive commands (use flags like --yes). Commands that never exit, such as dev ' +
-    `servers, are stopped at the timeout (default ${DEFAULT_TIMEOUT_SECONDS} s). Prefer ` +
-    'read_file, glob and grep over cat, find and grep commands.',
+    'interactive commands (use flags like --yes). For commands that keep running, such as dev ' +
+    'servers and watchers, set background: true (not nohup or &): it returns at once with an ' +
+    'id for command_output and stop_command, and heaw stops it when it exits. Other commands ' +
+    `are stopped at the timeout (default ${DEFAULT_TIMEOUT_SECONDS} s). Prefer read_file, glob ` +
+    'and grep over cat, find and grep commands.',
   kind: 'execute',
   parameters: z.object({
     command: z.string().describe('The command to run'),
@@ -23,9 +26,17 @@ export const runCommand = defineTool({
       .max(MAX_TIMEOUT_SECONDS)
       .optional()
       .describe(`Stop the command after this many seconds (default ${DEFAULT_TIMEOUT_SECONDS})`),
+    background: z
+      .boolean()
+      .optional()
+      .describe('Keep it running in the background, e.g. a server; no timeout'),
   }),
   subject: (args) => args.command,
-  async run({ command, cwd, timeout_seconds = DEFAULT_TIMEOUT_SECONDS }, { workspace, signal }) {
+  async run(
+    { command, cwd, timeout_seconds = DEFAULT_TIMEOUT_SECONDS, background },
+    { workspace, signal },
+  ) {
+    if (background) return startInBackground(workspace, command, cwd, signal);
     const result = await workspace.exec(command, {
       cwd,
       timeoutMs: timeout_seconds * 1000,
@@ -45,4 +56,4 @@ export const runCommand = defineTool({
   },
 });
 
-export const SHELL_TOOLS = [runCommand];
+export const SHELL_TOOLS = [runCommand, commandOutput, stopCommand];

@@ -27,6 +27,8 @@ export interface Tool {
   readonly concurrency?: 'parallel' | 'serial' | undefined;
   /** How permission rules match the subject: as a path glob or as plain text. Default: `text`. */
   readonly subjectType?: 'path' | 'text' | undefined;
+  /** Asked about every time, in every mode, unless approved in advance (deny rules still win). */
+  readonly alwaysAsk?: boolean | undefined;
 
   /** Validates arguments from the model. An error message goes back to the model. */
   parse(args: unknown): { ok: true; args: unknown } | { ok: false; error: string };
@@ -73,6 +75,19 @@ export interface AgentContext {
   emit: (event: EngineEvent) => void;
   /** What the run's file tools change; a sub-agent's changes count as its parent's run. */
   changes?: FileChanges | undefined;
+  /** Plan mode of the user's agent; sub-agents have none. */
+  plan?: PlanControl | undefined;
+}
+
+/** Switches plan mode (docs/DESIGN.md §4.8) from a tool. */
+export interface PlanControl {
+  active(): boolean;
+  /** Read-only except the plan file, thinking harder. */
+  enter(): void;
+  /** Back to the mode and effort from before; false when plan mode was off. */
+  leave(): boolean;
+  /** The user approved the plan: the agent builds it, and is kept at it until it is done. */
+  build(): void;
 }
 
 export type ToolOutput = string | { output: string; isError?: boolean };

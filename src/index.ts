@@ -32,6 +32,7 @@ export {
 // An engine set up from the project's config files, as `heaw` does it.
 export {
   createProjectEngine,
+  inspectProject,
   loadProject,
   NoModelError,
   type Project,
@@ -61,6 +62,7 @@ export {
   skillsIn,
   type Skill,
 } from './skills/skills.js';
+export { BUILT_IN_SKILLS, SETUP_HARNESS_SKILL } from './skills/built-in.js';
 export {
   Session,
   DEFAULT_COMPACT_AT,

@@ -53,10 +53,8 @@ export async function initCommand(
       'Next:',
       `  1. Put your credentials in .env${existsSync(join(cwd, '.env')) ? '' : ' (copy .env.example)'}.`,
       `  2. Check the model in heaw.config.ts (now ${model}).`,
-      '  3. Describe the project in AGENTS.md: what it is, how to build and test it, conventions.',
-      '  4. Run heaw.',
-      '',
-      'More agents go in .heaw/agents/<name>.md; skills in .heaw/skills/<name>/SKILL.md.',
+      '  3. Run heaw and type /setup: the agent asks a few questions about the project, then',
+      '     writes AGENTS.md and the rest of the harness with you, and heaw applies it.',
       '',
     ].join('\n'),
   );
@@ -146,8 +144,8 @@ export default defineConfig({
     mode: 'default',
     // Calls that never need approval, e.g. 'run_command(npm test*)':
     allow: [${tests ? `'run_command(${tests}*)'` : ''}],
-    // Calls that are never allowed:
-    deny: ['read_file(**/.env*)'],
+    // Calls that are never allowed (.env.example stays readable):
+    deny: ['read_file(**/.env)', 'read_file(**/.env.!(example))'],
   },
 
   // providers: {

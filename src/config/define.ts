@@ -58,6 +58,8 @@ export interface HeawConfig {
    * configured, which checks in its own way.
    */
   verifyChanges?: boolean;
+  /** How hard models that reason think: low, medium or high. Default: the provider's. `/plan` uses high. */
+  reasoningEffort?: 'low' | 'medium' | 'high';
   /**
    * Sub-agents started with `delegate` (agents are defined in `.heaw/agents/*.md`): how deep
    * they may nest (default 1: sub-agents cannot start their own), how many run at once (4), and

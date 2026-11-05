@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { rgPath } from '@vscode/ripgrep';
@@ -18,7 +19,7 @@ import {
   MAX_CAPTURE_CHARS,
   OutputBuffer,
 } from './exec.js';
-import { killTree } from './process.js';
+import { killMarked, killTree } from './process.js';
 import { detectShell, type ShellSpec } from './shell.js';
 
 /** Runs tools directly on this machine, confined to `root` (docs/DESIGN.md §4.12). */
@@ -27,7 +28,10 @@ export class LocalWorkspace implements Workspace {
   readonly root: string;
   readonly shell: string;
   readonly #shell: ShellSpec;
-  readonly #running = new Set<ChildProcess>();
+  /** Running commands, with the marker their processes carry (see `#stop`). */
+  readonly #running = new Map<ChildProcess, string>();
+  /** Stops still going (taskkill, sweeps), which `dispose` waits for. */
+  readonly #stopping = new Set<Promise<void>>();
 
   constructor(root: string, options: { shell?: ShellSpec } = {}) {
     this.root = resolve(root);
@@ -84,25 +88,39 @@ export class LocalWorkspace implements Workspace {
   }
 
   async exec(command: string, options: ExecOptions = {}): Promise<ExecResult> {
+    // Marks every process of this command, so stopping it can find them all (see #stop).
+    const execId = randomUUID();
     const child = spawn(this.#shell.file, this.#shell.args(command), {
       cwd: this.resolve(options.cwd ?? '.'),
-      env: { ...process.env, ...COMMAND_ENV },
+      env: { ...process.env, ...COMMAND_ENV, HEAW_EXEC_ID: execId },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       // Own process group on POSIX, so the whole tree can be stopped (see killTree).
       detached: process.platform !== 'win32',
     });
-    this.#running.add(child);
+    this.#running.set(child, execId);
     try {
       return await capture(child, {
         timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         signal: options.signal,
-        stop: () => killTree(child),
+        onOutput: options.onOutput,
+        stop: () => this.#stop(child, execId),
         startError: (error) => `Could not start ${this.#shell.file}: ${error.message}`,
       });
     } finally {
       this.#running.delete(child);
     }
+  }
+
+  /** Stops a command and everything it started, in Git Bash also what `exec` cut loose. */
+  #stop(child: ChildProcess, execId: string): void {
+    const sweep = this.#shell.msys && process.platform === 'win32';
+    const stopping = Promise.all([
+      killTree(child),
+      sweep ? killMarked(this.#shell.file, execId) : undefined,
+    ]).then(() => undefined);
+    this.#stopping.add(stopping);
+    void stopping.finally(() => this.#stopping.delete(stopping));
   }
 
   ripgrep(
@@ -127,10 +145,10 @@ export class LocalWorkspace implements Workspace {
     });
   }
 
-  dispose(): Promise<void> {
-    for (const child of this.#running) killTree(child);
+  async dispose(): Promise<void> {
+    for (const [child, execId] of this.#running) this.#stop(child, execId);
     this.#running.clear();
-    return Promise.resolve();
+    await Promise.all(this.#stopping);
   }
 
   #isOutside(absolute: string): boolean {

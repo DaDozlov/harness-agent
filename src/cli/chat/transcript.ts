@@ -178,7 +178,11 @@ function applyEvent(state: TranscriptState, event: EngineEvent): TranscriptState
         kind: 'notice',
         id,
         tone: event.hook === 'userPrompt' ? 'warning' : 'info',
-        text: from + describeHook(event.hook, event.message),
+        text:
+          from +
+          (event.builtIn
+            ? `Not done yet, so the agent goes on: ${shorten(event.message, 200)}`
+            : describeHook(event.hook, event.message)),
       }));
     case 'error':
       return push(state, (id) => ({
@@ -213,6 +217,12 @@ const STOP_NOTES: Partial<Record<StopReason, { text: string; tone: 'info' | 'war
   cost_limit: { text: 'Stopped: this message reached its cost limit.', tone: 'warning' },
   time_limit: { text: 'Stopped: this message reached its time limit.', tone: 'warning' },
   content_filter: { text: "The provider's content filter blocked the answer.", tone: 'warning' },
+  check_failed: {
+    text:
+      'Stopped: a check before finishing failed the same way 3 times, so the agent is stuck or ' +
+      'the check cannot run here. Fix what it reports, or the check (heaw.config.ts, then /reload).',
+    tone: 'warning',
+  },
 };
 
 /**
@@ -278,8 +288,11 @@ export function itemsFromHistory(messages: Message[]): TranscriptItem[] {
     // The acknowledgement that follows a summary is bookkeeping, not part of the conversation.
     const previous = messages[index - 1];
     if (previous?.role === 'user' && textOf(previous).startsWith(SUMMARY_PREFIX)) continue;
+    const texts: string[] = [];
     for (const part of message.content) {
-      if (part.type === 'text' && part.text) {
+      // A final answer that repeats a progress message of the same response is shown once.
+      if (part.type === 'text' && part.text && !texts.some((text) => text.startsWith(part.text))) {
+        texts.push(part.text);
         items.push({ kind: 'assistant', id: id(), text: part.text, done: true });
       }
       if (part.type === 'tool-call') {
@@ -304,6 +317,11 @@ function describeCompaction(event: Extract<EngineEvent, { type: 'compaction' }>)
   const how = event.method === 'summary' ? 'older turns summarized' : 'old tool outputs cleared';
   const sizes = `${formatTokens(event.beforeTokens)} → ${formatTokens(event.afterTokens)} tokens`;
   return `Context compacted${event.trigger === 'auto' ? ' to fit the window' : ''}: ${sizes}, ${how}.`;
+}
+
+function shorten(text: string, length: number): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  return oneLine.length > length ? `${oneLine.slice(0, length)}…` : oneLine;
 }
 
 function describeHook(hook: HookName, message: string): string {

@@ -1,5 +1,7 @@
 # Configuration reference
 
+The quickest way to a working setup: `heaw`, then `/setup`. The agent asks about the project and writes these files with you, checks them with its `check_config` tool, and the chat applies them before your next message (also when you edit these files yourself; `/reload` applies them at once).
+
 ## `heaw.config.ts`
 
 ```ts
@@ -17,7 +19,8 @@ export default defineConfig({ /* settings below */ });
 | `context.compactAt` | Compact at this share of the window, or `false` | `0.8` |
 | `hooks` | Functions at fixed points (below); one set or an array | — |
 | `verifyChanges` | Send the agent back once when it changed files and ran nothing since | `true` (off with a `beforeStop` hook) |
-| `toolsets` | `fs`, `shell`, `web`, `todo`, `http`, `mcp`, `agents`, `skills`, `memory` | all |
+| `reasoningEffort` | `low`, `medium` or `high`, for models that reason; `/plan` uses `high` | provider default |
+| `toolsets` | `fs`, `shell`, `web`, `todo`, `plan`, `http`, `mcp`, `agents`, `skills`, `memory` | all |
 | `tools` | Your tools, made with `defineTool` | — |
 | `mcpServers` | Same shape as `.mcp.json`; secrets with `env('NAME')` | — |
 | `http.apis` | APIs for `http_request` by base URL: `{ headers, description }` | — |
@@ -48,6 +51,8 @@ heaw reads `.env` from the project root.
 
 Order: deny → approvals (`--allow`, "yes for the session") → protected files → ask → allow → mode. Protected files (`heaw.config.*`, `.mcp.json`, `.heaw/`, `.git/`) are always asked about.
 
+"Yes for the session" (**a**) allows the call, and also: after a file edit in `default` mode, all file edits (`accept-edits`); after a command, commands starting with the same words (`./mvnw -q test …`), never chained ones. Shells, interpreters and destructive programs (`python`, `node`, `docker`, `curl`, `rm`, …) are allowed only exactly. The prompt shows what it allows.
+
 ## Hooks
 
 | Hook | Can |
@@ -62,7 +67,7 @@ Order: deny → approvals (`--allow`, "yes for the session") → protected files
 | `subagentStart` / `subagentEnd` | Change or block a sub-agent's task / report |
 | `sessionEnd` | Clean up, export |
 
-Every hook gets `workspace` (run checks with `workspace.exec`), the session and agent ids, the model and a signal; `runAgent(name, task)` runs a named agent, e.g. a reviewer. Personal hooks run before project hooks. A failing `beforeToolCall` blocks the call; other failures are reported and skipped.
+Every hook gets `workspace` (run checks with `workspace.exec`), the session and agent ids, the model and a signal; `runAgent(name, task)` runs a named agent, e.g. a reviewer. Personal hooks run before project hooks. A failing `beforeToolCall` blocks the call; other failures are reported and skipped. When `beforeStop` returns the same feedback 3 times in a row (timings aside), the run stops with `check_failed`: the agent is stuck, or the check cannot run.
 
 ## Agents and skills
 

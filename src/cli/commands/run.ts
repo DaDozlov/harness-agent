@@ -210,6 +210,8 @@ const STOP_NOTES: Partial<Record<StopReason, string>> = {
   max_turns: 'Stopped: reached the maximum number of turns.',
   token_limit: 'Stopped: reached the token limit (limits.maxTokens).',
   cost_limit: 'Stopped: reached the cost limit (--max-cost or limits.maxCostUsd).',
+  check_failed:
+    'Stopped: a check before finishing failed the same way 3 times; it needs you (fix what it reports, or the check in heaw.config.ts).',
   time_limit: 'Stopped: reached the time limit (--max-minutes or limits.maxMinutes).',
   content_filter: "Stopped: the provider's content filter blocked the answer.",
   aborted: 'Stopped: interrupted.',

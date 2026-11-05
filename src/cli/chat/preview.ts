@@ -17,6 +17,14 @@ const PREVIEWS: Record<
     { text: 'and stops servers that were removed.' },
     { text: 'MCP servers are programs that run on this computer.', color: 'gray' },
   ],
+  finish_plan: (text) => [
+    ...limited((text('summary') ?? '').split('\n'), (line) => ({ text: line })),
+    {
+      text: 'Read PLAN.md first. Yes: plan mode ends and the agent builds it step by step.',
+      color: 'gray',
+    },
+    { text: 'No with feedback: the agent revises the plan.', color: 'gray' },
+  ],
   web_fetch: (text) => (text('url') === undefined ? undefined : [{ text: `GET ${text('url')}` }]),
   http_request: (text, args) => {
     if (text('url') === undefined) return undefined;

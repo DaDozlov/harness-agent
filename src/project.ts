@@ -17,7 +17,10 @@ import { telemetryFromEnv, type TelemetryOptions } from './observability/otel.js
 import type { Env } from './providers/registry.js';
 import { resolveSetting } from './providers/settings.js';
 import { JsonlSessionStore } from './sessions/jsonl-store.js';
+import { checkConfigTool, describeLoadedProject } from './project-check.js';
+import { BUILT_IN_SKILLS } from './skills/built-in.js';
 import { loadSkills } from './skills/skills.js';
+import { DEFAULT_TOOLSETS } from './tools/index.js';
 import { DockerWorkspace, type DockerOptions } from './workspace/docker.js';
 import { LocalWorkspace } from './workspace/local.js';
 import { detectShell } from './workspace/shell.js';
@@ -113,6 +116,7 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     loadSkills({ projectRoot, heawHome: home }),
   ]);
   const limits = { ...config.limits, ...definedOnly(options.limits ?? {}) };
+  const fileTools = options.tools !== false && (config.toolsets ?? DEFAULT_TOOLSETS).includes('fs');
 
   const engineOptions: EngineOptions = {
     model,
@@ -130,19 +134,29 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     ...(options.tools === false
       ? { toolsets: [] }
       : config.toolsets && { toolsets: config.toolsets }),
-    ...(config.tools && { tools: config.tools }),
+    // check_config validates the project's setup as this function loads it (the setup-harness skill).
+    ...(options.tools !== false && {
+      tools: [...(config.tools ?? []), checkConfigTool(() => inspectProject(options))],
+    }),
     ...(config.http && { http: config.http }),
     ...(config.providers && { providers: config.providers }),
     ...(config.models && { models: config.models }),
     ...(Object.keys(limits).length && { limits }),
     ...(config.hooks && { hooks: config.hooks }),
     ...(agents.items.length && { agents: agents.items }),
-    ...(skills.items.length && { skills: skills.items }),
+    // Built-in skills (they write files), unless the project has its own of the same name.
+    skills: [
+      ...(fileTools ? BUILT_IN_SKILLS : []).filter(
+        (skill) => !skills.items.some((own) => own.name === skill.name),
+      ),
+      ...skills.items,
+    ],
     ...(config.subagents && { subagents: config.subagents }),
     ...withTelemetry(config.telemetry, env, redact),
     ...(config.context?.compactAt !== undefined && { compactAt: config.context.compactAt }),
     ...(options.intent && { intent: options.intent }),
     ...(config.verifyChanges !== undefined && { verifyChanges: config.verifyChanges }),
+    ...(config.reasoningEffort && { reasoningEffort: config.reasoningEffort }),
     ...(save && { sessionStore: new JsonlSessionStore(projectRoot, { redact }) }),
     // No tools means no MCP tools either.
     ...(options.tools !== false && {
@@ -163,6 +177,17 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     warnings: [...agents.problems, ...skills.problems],
     createWorkspace,
   };
+}
+
+/**
+ * Loads the project as `heaw` would and describes what it sets up, or what stops it from
+ * loading (config errors, invalid rules, missing credentials). What `check_config` returns.
+ */
+export function inspectProject(options: ProjectOptions = {}): Promise<string> {
+  return describeLoadedProject(
+    () => loadProject({ ...options, save: false }),
+    options.env ?? process.env,
+  );
 }
 
 /**

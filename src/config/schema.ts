@@ -172,6 +172,7 @@ const configSchema = z
       })
       .optional(),
     verifyChanges: z.boolean().optional(),
+    reasoningEffort: z.enum(['low', 'medium', 'high']).optional(),
     sessions: z.object({ save: z.boolean().optional() }).strict().optional(),
     // Checked in detail when servers load, with messages that name the server.
     mcpServers: z.record(z.string(), z.unknown()).optional(),

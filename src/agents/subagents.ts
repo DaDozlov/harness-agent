@@ -148,7 +148,9 @@ async function runSubagent(run: {
     .tools()
     .filter((tool) => !wanted || wanted.includes(tool.name))
     // Nesting stops at the depth limit.
-    .filter((tool) => tool.name !== 'delegate' || parent.depth + 1 < maxDepth);
+    .filter((tool) => tool.name !== 'delegate' || parent.depth + 1 < maxDepth)
+    // Plan mode belongs to the user's agent.
+    .filter((tool) => tool.name !== 'start_plan' && tool.name !== 'finish_plan');
   const session = await run.createSession({
     name,
     agentId: run.agentId,
@@ -207,6 +209,7 @@ const STOPPED_EARLY: Partial<Record<StopReason, string>> = {
   cost_limit: 'reached its cost limit',
   time_limit: 'reached its time limit',
   max_tokens: 'hit the model output limit',
+  check_failed: 'kept failing the same check',
   content_filter: "was stopped by the provider's content filter",
   aborted: 'was interrupted',
   error: 'failed',

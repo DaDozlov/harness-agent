@@ -1,9 +1,13 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { render } from 'ink';
+import { findProjectRoot } from '../../config/project.js';
 import type { Session } from '../../core/session.js';
 import { createEngine, type Engine } from '../../engine.js';
 import { type AgentFlags, setupEngine, userFacingMessage } from '../setup.js';
 import { type ChatStart, ChatRoot } from './ChatRoot.js';
 import { bypassNotice } from './commands.js';
+import { type EngineFactory, SetupWatcher } from './reload.js';
 
 export interface ChatOptions extends AgentFlags {
   /** `-c`: continue the most recent conversation. */
@@ -25,15 +29,29 @@ export async function startChat(
     return 2;
   }
 
-  let engine: Engine;
-  let start: ChatStart;
-  try {
-    const { options: engineOptions, warnings } = await setupEngine(options, {
+  const setup = () =>
+    setupEngine(options, {
       cwd: process.cwd(),
       env,
       interactive: true,
       packageEntry: context.packageEntry,
     });
+  const projectRoot = findProjectRoot(process.cwd());
+  // Setup files changed since the last load are applied before the next message.
+  const setupWatcher = await SetupWatcher.start(projectRoot);
+  // `/reload`: the config files as they are now, and variables added to .env since the start.
+  const reloadEngine: EngineFactory = async () => {
+    await setupWatcher.accept();
+    const dotenv = join(projectRoot, '.env');
+    if (existsSync(dotenv)) process.loadEnvFile(dotenv);
+    const { options: engineOptions, warnings } = await setup();
+    return { engine: await createEngine(engineOptions), warnings };
+  };
+
+  let engine: Engine;
+  let start: ChatStart;
+  try {
+    const { options: engineOptions, warnings } = await setup();
     for (const warning of warnings) stderr.write(`Warning: ${warning}\n`);
     engine = await createEngine(engineOptions);
     if (engineOptions.permissions?.mode === 'bypass') {
@@ -55,12 +73,26 @@ export async function startChat(
 
   let current: Session | undefined = start.kind === 'session' ? start.session : undefined;
   const app = render(
-    <ChatRoot engine={engine} start={start} onSessionChange={(session) => (current = session)} />,
+    <ChatRoot
+      engine={engine}
+      start={start}
+      onSessionChange={(session) => (current = session)}
+      reloadEngine={reloadEngine}
+      setupChanges={() => setupWatcher.changes()}
+      onEngineChange={(next) => (engine = next)}
+    />,
     { exitOnCtrlC: false },
   );
+  // Closing the terminal (SIGHUP, also on Windows) or a kill ends the chat the normal way, so
+  // running commands, background ones included, are stopped before heaw exits.
+  const hangUp = () => app.unmount();
+  process.once('SIGHUP', hangUp);
+  process.once('SIGTERM', hangUp);
   try {
     await app.waitUntilExit();
   } finally {
+    process.off('SIGHUP', hangUp);
+    process.off('SIGTERM', hangUp);
     // Runs sessionEnd hooks and saves what is left.
     const failures = (await current?.close()) ?? [];
     for (const failure of failures) {

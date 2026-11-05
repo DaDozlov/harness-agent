@@ -13,9 +13,14 @@ export interface ApprovalRequest {
   /** The command, path or host the permission rules looked at. */
   subject: string | undefined;
   reason: string;
+  /** What answering "yes for the session" allows, e.g. all file edits. */
+  forSession?: string | undefined;
 }
 
-/** The answer to an `approval.request`. `session` also allows this exact call for the session. */
+/**
+ * The answer to an `approval.request`. `session` also allows the call for the rest of the
+ * session, and what `forSession` says (all file edits, or commands with the same leading words).
+ */
 export type ApprovalDecision =
   { allow: true; scope: 'once' | 'session' } | { allow: false; feedback?: string | undefined };
 
@@ -26,6 +31,8 @@ export type ApprovalDecision =
  * - `max_turns`: the run hit its turn limit while the model still wanted to continue.
  * - `token_limit`, `cost_limit`, `time_limit`: the run reached one of its other limits.
  * - `blocked`: a `userPrompt` hook rejected the input.
+ * - `check_failed`: a `beforeStop` check failed the same way several times in a row, so the
+ *   agent is stuck (or the check cannot run) and a person has to look.
  */
 export type StopReason =
   | 'end_turn'
@@ -35,6 +42,7 @@ export type StopReason =
   | 'cost_limit'
   | 'time_limit'
   | 'blocked'
+  | 'check_failed'
   | 'content_filter'
   | 'aborted'
   | 'error';
@@ -102,6 +110,8 @@ export type EngineEventBody =
       /** The command, path or host the permission rules looked at. */
       subject: string | undefined;
       reason: string;
+      /** What answering "yes for the session" allows, e.g. all file edits. */
+      forSession?: string | undefined;
     }
   | { type: 'approval.response'; requestId: string; decision: ApprovalDecision }
   /** One model call's usage, and its cost when the price is known. */
@@ -116,7 +126,13 @@ export type EngineEventBody =
       afterTokens: number;
     }
   /** A hook changed what happens, e.g. blocked a prompt or asked the agent to keep working. */
-  | { type: 'hook'; hook: HookName; message: string }
+  | {
+      type: 'hook';
+      hook: HookName;
+      message: string;
+      /** heaw's own reminder (changes nothing checked, plan steps still open), not a config hook. */
+      builtIn?: boolean;
+    }
   /** A sub-agent started (docs/DESIGN.md §4.7). Its own events carry `parentAgentId`. */
   | { type: 'subagent.start'; childAgentId: string; name: string; task: string }
   | {

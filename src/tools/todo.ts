@@ -1,5 +1,8 @@
 import { z } from 'zod';
+import { TODO_STATE } from '../core/plan.js';
 import { defineTool } from './define.js';
+
+export { TODO_STATE };
 
 const todoItem = z.object({
   content: z.string().min(1).describe('The task, e.g. "Add tests for the parser"'),
@@ -7,9 +10,6 @@ const todoItem = z.object({
 });
 
 export type TodoItem = z.output<typeof todoItem>;
-
-/** Where the current list lives in the session's tool state. */
-export const TODO_STATE = 'todo.items';
 
 /**
  * The agent's plan for a longer task (docs/DESIGN.md §4.4). The list lives in the session: the

@@ -45,7 +45,8 @@ export default defineConfig({
       'mcp__atlassian__transition*',
     ],
     deny: [
-      'read_file(**/.env*)',
+      'read_file(**/.env)',
+      'read_file(**/.env.!(example))',
       'run_command(git push --force*)',
       'run_command(git push -f*)',
       'mcp__github__merge_pull_request',

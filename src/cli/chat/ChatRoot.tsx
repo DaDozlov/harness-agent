@@ -6,6 +6,7 @@ import type { Engine } from '../../engine.js';
 import { App } from './App.js';
 import { SessionPicker } from './components/SessionPicker.js';
 import { KeyboardProvider } from './keyboard.js';
+import type { EngineFactory } from './reload.js';
 
 export type ChatStart =
   | { kind: 'session'; session: Session; resumed: boolean }
@@ -16,10 +17,16 @@ export function ChatRoot({
   engine,
   start,
   onSessionChange,
+  reloadEngine,
+  setupChanges,
+  onEngineChange,
 }: {
   engine: Engine;
   start: ChatStart;
   onSessionChange: (session: Session) => void;
+  reloadEngine?: EngineFactory;
+  setupChanges?: () => Promise<string[]>;
+  onEngineChange?: (engine: Engine) => void;
 }) {
   const { exit } = useApp();
   const [chat, setChat] = useState(start.kind === 'session' ? start : undefined);
@@ -32,6 +39,9 @@ export function ChatRoot({
         session={chat.session}
         resumed={chat.resumed}
         onSessionChange={onSessionChange}
+        {...(reloadEngine && { reloadEngine })}
+        {...(setupChanges && { setupChanges })}
+        {...(onEngineChange && { onEngineChange })}
       />
     );
   }

@@ -7,6 +7,8 @@ export interface ShellSpec {
   name: string;
   file: string;
   args(command: string): string[];
+  /** A bash of Git for Windows (MSYS2, Cygwin): stopping a command also sweeps its `/proc`. */
+  msys?: boolean;
 }
 
 type Env = Record<string, string | undefined>;
@@ -31,7 +33,9 @@ function shellAt(file: string, platform: NodeJS.Platform): ShellSpec {
   const name = basename(file).toLowerCase();
   if (name.startsWith('powershell') || name.startsWith('pwsh')) return powerShell(file);
   if (platform === 'win32' && /\\git\\/i.test(file))
-    return { ...posixShell(file), name: 'bash (Git Bash)' };
+    return { ...posixShell(file), name: 'bash (Git Bash)', msys: true };
+  // MSYS2 or Cygwin bash; WSL's bash has no /proc/<pid>/winpid, so its sweep finds nothing.
+  if (platform === 'win32' && name.startsWith('bash')) return { ...posixShell(file), msys: true };
   return posixShell(file);
 }
 
@@ -52,7 +56,7 @@ function findGitBash(env: Env): ShellSpec | undefined {
 
   for (const root of roots) {
     const bash = join(root, 'bin', 'bash.exe');
-    if (existsSync(bash)) return { ...posixShell(bash), name: 'bash (Git Bash)' };
+    if (existsSync(bash)) return { ...posixShell(bash), name: 'bash (Git Bash)', msys: true };
   }
   return undefined;
 }

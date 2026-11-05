@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { WorkspaceError } from '../../src/core/workspace.js';
+import { collapseProgress } from '../../src/workspace/exec.js';
 import { LocalWorkspace } from '../../src/workspace/local.js';
 import { detectShell } from '../../src/workspace/shell.js';
 import { tempWorkspaceFactory } from '../helpers.js';
@@ -85,6 +86,36 @@ describe('LocalWorkspace exec', () => {
     expect(Date.now() - started).toBeLessThan(10_000);
     const childPid = Number(await readFile(join(workspace.root, 'child.pid'), 'utf8'));
     await expect.poll(() => isRunning(childPid), { timeout: 5_000 }).toBe(false);
+  });
+
+  it.skipIf(detectShell().name.includes('PowerShell'))(
+    'stops what scripts handed over to with exec (as the Maven wrapper does) before dispose returns',
+    async () => {
+      const workspace = new LocalWorkspace((await tempWorkspace()).root);
+      await workspace.writeFile(
+        'child.js',
+        "require('fs').writeFileSync('child.pid', String(process.pid)); setTimeout(() => {}, 60000);",
+      );
+      await workspace.writeFile('outer.sh', 'exec sh ./inner.sh\n');
+      await workspace.writeFile('inner.sh', 'exec node child.js\n');
+
+      const running = workspace.exec('sh ./outer.sh', { timeoutMs: 60_000 });
+      await expect.poll(() => workspace.stat('child.pid'), { timeout: 10_000 }).toBeDefined();
+      const childPid = Number(await readFile(join(workspace.root, 'child.pid'), 'utf8'));
+      // heaw exits right after dispose: whatever is still running then would live on.
+      await workspace.dispose();
+
+      expect(isRunning(childPid)).toBe(false);
+      // Nothing holds its output open any more, so the command ends.
+      expect((await running).timedOut).toBe(false);
+    },
+  );
+
+  it('keeps only the last version of lines a progress bar redraws', () => {
+    expect(collapseProgress('Progress 10%\rProgress 50%\rProgress 100%\r\nDone\r\n')).toBe(
+      'Progress 100%\nDone\n',
+    );
+    expect(collapseProgress('plain\noutput')).toBe('plain\noutput');
   });
 
   it('stops a command when the signal aborts', async () => {

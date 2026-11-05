@@ -19,7 +19,8 @@ export default defineConfig({
       'run_command(git log*)',
     ],
     deny: [
-      'read_file(**/.env*)',
+      'read_file(**/.env)',
+      'read_file(**/.env.!(example))',
       'run_command(git push*)',
       // npm changes the lockfile; nobody edits it by hand.
       'write_file(**/package-lock.json)',

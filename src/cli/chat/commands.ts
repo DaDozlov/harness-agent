@@ -1,8 +1,10 @@
 import { PERMISSION_MODES, type PermissionMode } from '../../core/permissions.js';
+import { archivePlan, PLAN_FILE } from '../../core/plan.js';
 import type { Session } from '../../core/session.js';
 import type { UsageBreakdown } from '../../core/usage-stats.js';
 import { describeMcpServer, type Engine } from '../../engine.js';
 import { ProviderConfigError } from '../../providers/registry.js';
+import { BUILD_INSTRUCTIONS } from '../../tools/plan.js';
 import { formatCost, formatTokens } from '../format.js';
 import { openBrowser } from '../open-browser.js';
 
@@ -16,7 +18,23 @@ export interface CommandContext {
   exit: () => void;
   /** Shows a login page; false when it could not. Default: the system browser. */
   openUrl?: (url: URL) => boolean | Promise<boolean>;
+  /** Sends a message to the agent, as if the user had typed it (shown as the command). */
+  send?: (text: string) => void;
+  /** Rebuilds the engine from the config files, continuing the conversation; returns a report. */
+  reload?: () => Promise<string>;
 }
+
+/** What `/setup` asks the agent to do. */
+export const SETUP_PROMPT =
+  'Set up the heaw harness for this project with me: load the setup-harness skill and follow it.';
+
+/** What `/plan <task>` asks the agent to do. */
+export function planPrompt(task: string): string {
+  return `Plan this with me before building it: load the plan-work skill and follow it. Task: ${task}`;
+}
+
+/** What `/plan go` asks the agent to do. */
+export const BUILD_PROMPT = `${PLAN_FILE} is approved. ${BUILD_INSTRUCTIONS}`;
 
 export interface SlashCommand {
   name: string;
@@ -189,9 +207,10 @@ export const COMMANDS: SlashCommand[] = [
     name: 'permissions',
     description: 'Show the permission mode and rules',
     run(_args, { session, print }) {
-      const { mode, allow, ask, deny, preapproved, sessionApprovals } =
+      const { mode, allow, ask, deny, preapproved, sessionApprovals, sessionRules } =
         session().permissions.describe();
       const list = (rules: string[]) => (rules.length ? rules.join(', ') : 'none');
+      const calls = `${sessionApprovals} call${sessionApprovals === 1 ? '' : 's'}`;
       print(
         [
           `Mode: ${mode}`,
@@ -199,7 +218,7 @@ export const COMMANDS: SlashCommand[] = [
           `Ask: ${list(ask)}`,
           `Deny: ${list(deny)}`,
           ...(preapproved.length ? [`Allowed with --allow: ${list(preapproved)}`] : []),
-          `Allowed for this session: ${sessionApprovals} call${sessionApprovals === 1 ? '' : 's'}`,
+          `Allowed for this session: ${[...sessionRules, calls].join(', ')}`,
         ].join('\n'),
       );
     },
@@ -244,6 +263,68 @@ export const COMMANDS: SlashCommand[] = [
         `Compacted: ${formatTokens(report.beforeTokens)} → ${formatTokens(report.afterTokens)} tokens${cost}. ` +
           'Recent turns are kept as they were.',
       );
+    },
+  },
+  {
+    name: 'setup',
+    usage: '[notes]',
+    description: 'Have the agent set up the harness for this project with you (asks, then writes)',
+    run(args, { send, print }) {
+      if (!send) return print('/setup works in the chat.');
+      send(args ? `${SETUP_PROMPT} Notes: ${args}` : SETUP_PROMPT);
+    },
+  },
+  {
+    name: 'plan',
+    usage: '<task> | go | off',
+    description: 'Plan a task first (read-only, writes PLAN.md); /plan go builds it step by step',
+    async run(args, { session, send, print, refresh, engine }) {
+      if (!send) return print('/plan works in the chat.');
+      const current = session();
+      const task = args.trim();
+      if (task === 'off') {
+        const was = current.leavePlanMode();
+        refresh();
+        return print(
+          was ? `Left plan mode (${current.permissions.mode} mode).` : 'Not in plan mode.',
+        );
+      }
+      if (task === 'go') {
+        if (!(await engine.workspace.stat(PLAN_FILE))) {
+          return print(`There is no ${PLAN_FILE} yet. Start with /plan <task>.`);
+        }
+        current.leavePlanMode();
+        current.buildPlan();
+        refresh();
+        print(`Building ${PLAN_FILE} step by step (${current.permissions.mode} mode).`);
+        return send(BUILD_PROMPT);
+      }
+      if (!task) {
+        return print(
+          current.inPlanMode
+            ? `Plan mode: review ${PLAN_FILE}, then /plan go to build it or /plan off to leave.`
+            : 'Usage: /plan <task>. The agent asks, writes PLAN.md, and builds it after /plan go.',
+        );
+      }
+      current.enterPlanMode();
+      refresh();
+      const archived = await archivePlan(engine.workspace);
+      print(
+        `Plan mode: the agent reads, asks and writes only ${PLAN_FILE}, thinking harder. ` +
+          'Then /plan go builds it, or /plan off leaves.' +
+          (archived ? ` The previous plan is in ${archived}.` : ''),
+      );
+      send(planPrompt(task) + (archived ? ` (The previous plan was moved to ${archived}.)` : ''));
+    },
+  },
+  {
+    name: 'reload',
+    description: 'Apply changes to heaw.config.ts, AGENTS.md, .mcp.json, agents and skills',
+    async run(_args, { reload, print, refresh }) {
+      if (!reload) return print('Reloading is not available here; restart heaw instead.');
+      print('Reloading the setup…');
+      print(await reload());
+      refresh();
     },
   },
   {
