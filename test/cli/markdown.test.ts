@@ -23,4 +23,42 @@ describe('renderMarkdown', () => {
     expect(plain(renderMarkdown(chunks[2]!))).toContain('7. Traces?');
     expect(plain(renderMarkdown('1. a\n2. b\n3. c'))).toMatch(/1\. a\n\s+2\. b\n\s+3\. c/);
   });
+
+  it('nests lists by their depth, numbers only their own items, and renders their inline Markdown', () => {
+    const text = [
+      'Changed:',
+      '- `AGENTS.md`',
+      '  - a rule with **bold**',
+      '- `heaw.config.ts`',
+      '  - allowed:',
+      '    - `run_command(git diff -- *)`',
+      '    - `run_command(git status*)`',
+      '',
+      '1. First',
+      '   - sub a',
+      '   - sub b',
+      '2. Second',
+      '- [x] done',
+    ].join('\n');
+
+    expect(plain(renderMarkdown(text))).toBe(
+      [
+        'Changed:',
+        '',
+        '  * AGENTS.md',
+        '    * a rule with bold',
+        '  * heaw.config.ts',
+        '    * allowed:',
+        '      * run_command(git diff -- *)',
+        '      * run_command(git status*)',
+        '',
+        '  1. First',
+        '     * sub a',
+        '     * sub b',
+        '  2. Second',
+        '',
+        '  * [X] done',
+      ].join('\n'),
+    );
+  });
 });
