@@ -12,6 +12,8 @@ export interface ToolDefinition<Schema extends z.ZodType> {
   subjectType?: 'path' | 'text';
   /** Ask the user every time, in every mode (see `Tool.alwaysAsk`). */
   alwaysAsk?: boolean;
+  /** How long output is cut (see `Tool.output`). */
+  output?: Tool['output'];
   /** What permission rules match against, e.g. the path or command. */
   subject?: (args: z.output<Schema>) => string | undefined;
   run(args: z.output<Schema>, context: ToolContext): ToolOutput | Promise<ToolOutput>;
@@ -36,6 +38,7 @@ export function defineTool<Schema extends z.ZodType>(definition: ToolDefinition<
     concurrency: definition.concurrency,
     subjectType: definition.subjectType,
     alwaysAsk: definition.alwaysAsk,
+    ...(definition.output && { output: definition.output }),
     parse(args) {
       const result = definition.parameters.safeParse(args);
       return result.success

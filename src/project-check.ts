@@ -40,7 +40,12 @@ export async function describeLoadedProject(
   const { options } = project;
   try {
     new PermissionPolicy(options.permissions);
-    const model = typeof options.model === 'string' ? await resolve(options, env) : options.model;
+    const model =
+      typeof options.model === 'string'
+        ? await resolve(options.model, options, env)
+        : options.model;
+    const subagentModel = options.subagents?.model;
+    if (subagentModel) await resolve(subagentModel, options, env);
     return summary(options, model, project.warnings);
   } catch (error) {
     return problem(error);
@@ -49,8 +54,7 @@ export async function describeLoadedProject(
   }
 }
 
-async function resolve(options: EngineOptions, env: Env): Promise<ModelClient> {
-  const spec = options.model as string;
+async function resolve(spec: string, options: EngineOptions, env: Env): Promise<ModelClient> {
   const model = await resolveModel(spec, {
     env,
     providers: options.providers,
@@ -87,6 +91,7 @@ function summary(options: EngineOptions, model: ModelClient, warnings: string[])
     `- MCP servers: ${servers.length ? `${servers.join(', ')} (they connect when heaw starts; OAuth ones need heaw mcp login <name>)` : 'none'}`,
     `- Instructions: ${list(options.instructions?.map((file) => file.source))}`,
     `- Agents: ${list(options.agents?.map((agent) => agent.name))}; skills: ${list(options.skills?.map((skill) => skill.name))}`,
+    ...(options.subagents?.model ? [`- Sub-agents: ${options.subagents.model}`] : []),
     ...(options.telemetry ? [`- Traces: ${options.telemetry.endpoint}`] : []),
     ...warnings.map((warning) => `- Warning: ${warning}`),
     'The chat applies it before the next message (heaw run: on its next start).',

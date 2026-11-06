@@ -2,11 +2,15 @@ import { z } from 'zod';
 import type { EngineEvent, StopReason } from '../core/events.js';
 import { hookFailureEvent } from '../core/hooks.js';
 import type { RunLimits } from '../core/loop.js';
-import { lastAnswer } from '../core/messages.js';
-import type { PermissionPolicy } from '../core/permissions.js';
+import { lastAnswer, type Message } from '../core/messages.js';
+import {
+  type PermissionPolicy,
+  type PermissionRestriction,
+  splitCommands,
+} from '../core/permissions.js';
 import type { Session } from '../core/session.js';
 import type { AgentContext, Tool, ToolOutput } from '../core/tools.js';
-import { emptyUsage } from '../core/usage.js';
+import { addUsage, emptyUsage } from '../core/usage.js';
 import { defineTool } from '../tools/define.js';
 import type { AgentDefinition } from './definitions.js';
 
@@ -17,11 +21,24 @@ export interface SubagentSettings {
   maxParallel?: number;
   /** Limits for each sub-agent whose definition sets none. Default: 50 turns. */
   limits?: Partial<RunLimits>;
+  /**
+   * `provider:model` for sub-agents whose definition names none, e.g. a cheaper one than the
+   * main agent's. Default: the calling agent's model.
+   */
+  model?: string;
+  /**
+   * The least budget a sub-agent starts with: its share of what the run has left (split among
+   * the sub-agents started together). Below it, it is not started. Default: $0.50, 30,000 tokens.
+   */
+  minBudget?: { costUsd?: number; tokens?: number };
 }
 
 export const DEFAULT_MAX_DEPTH = 1;
 const DEFAULT_MAX_PARALLEL = 4;
 const DEFAULT_LIMITS: Partial<RunLimits> = { maxTurns: 50 };
+const DEFAULT_MIN_BUDGET = { costUsd: 0.5, tokens: 30_000 };
+
+type Budget = { tokens?: number; costUsd?: number };
 
 /** What the engine needs to build a sub-agent's session. */
 export interface SubagentSpec {
@@ -64,8 +81,14 @@ export function delegateTool(options: {
       'turns and tools and returns only its final report, so your context stays small. Use it ' +
       'for work that would fill your context (searching or reviewing many files) or that a ' +
       'specialist does better. Independent tasks run in parallel when you call delegate several ' +
-      'times in one turn. The sub-agent sees only `task`, not this conversation: include the ' +
-      `goal, the relevant files and facts, constraints, and what to report.\n${named}` +
+      'times in one turn; sub-agents that change files then each need their own files, and you ' +
+      'change the shared ones: give each its `files`. The sub-agent sees only `task`, not this ' +
+      'conversation: include the goal, the facts it needs (interfaces, data shapes, helpers to ' +
+      'reuse, with paths), constraints, and what to report; say that text users will see must ' +
+      'describe the product, not this task. Give `check` when a command shows the task is done.' +
+      `\n${named}` +
+      'Act on what matters in a report (a review always finds something more), and do not send ' +
+      'the same work back for another round over minor points. ' +
       'Without `agent`, it is a general sub-agent: describe its role in `instructions` and ' +
       'optionally limit `tools` to some of yours.',
     kind: 'read',
@@ -84,6 +107,19 @@ export function delegateTool(options: {
         .array(z.string())
         .optional()
         .describe('For a general sub-agent: which of your tools it may use (default: all)'),
+      files: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Globs of the only files it may change, e.g. ["src/billing/**"]; its other writes are denied',
+        ),
+      check: z
+        .string()
+        .optional()
+        .describe(
+          'A command that shows the task is done, e.g. the tests of its files. A sub-agent that ' +
+            'can run commands must make it pass before it reports; otherwise you run it after.',
+        ),
     }),
     // Rules can allow or deny agents by name: delegate(reviewer).
     subject: (args) => args.agent ?? 'agent',
@@ -100,6 +136,11 @@ export function delegateTool(options: {
           isError: true,
         };
       }
+      // Sub-agents started together share what is left, instead of each getting all of it and
+      // all of them stopping at the limit at once.
+      const share = shareOf(parent.remaining(), context.together ?? 1);
+      const short = tooLittle(share, parent.remaining(), context.together ?? 1, options.settings);
+      if (short) return { output: short, isError: true };
       await slots.acquire(context.signal);
       try {
         return await runSubagent({
@@ -108,7 +149,11 @@ export function delegateTool(options: {
           task: args.task,
           instructions: args.instructions,
           toolNames: args.tools,
+          files: args.files,
+          check: args.check,
+          budget: share,
           agentId: `${definition?.name ?? 'agent'}-${++started}`,
+          callId: context.callId,
           settings: options.settings,
           createSession: options.createSession,
           signal: context.signal,
@@ -126,21 +171,23 @@ async function runSubagent(run: {
   task: string;
   instructions: string | undefined;
   toolNames: string[] | undefined;
+  /** Globs of the only files it may change. */
+  files: string[] | undefined;
+  /** A command that shows its task is done. */
+  check: string | undefined;
+  /** Its share of what the parent's run has left. */
+  budget: Budget;
   agentId: string;
+  /** The delegate call that starts it. */
+  callId: string;
   settings: SubagentSettings;
   createSession: CreateSubagentSession;
   signal: AbortSignal;
 }): Promise<ToolOutput> {
-  const { parent, definition, signal } = run;
+  const { parent, definition, signal, check } = run;
   const name = definition?.name ?? 'agent';
   const hookContext = parent.hookContext(signal);
   const report = (event: EngineEvent) => parent.emit(event);
-
-  const start = await parent.hooks.subagentStart(hookContext, name, run.task);
-  for (const failure of start.failures) report(parent.stamp(hookFailureEvent(failure)));
-  if (start.block !== undefined)
-    return { output: `Blocked by a hook: ${start.block}`, isError: true };
-  const task = start.task;
 
   const maxDepth = run.settings.maxDepth ?? DEFAULT_MAX_DEPTH;
   const wanted = definition?.tools ?? run.toolNames;
@@ -151,6 +198,23 @@ async function runSubagent(run: {
     .filter((tool) => tool.name !== 'delegate' || parent.depth + 1 < maxDepth)
     // Plan mode belongs to the user's agent.
     .filter((tool) => tool.name !== 'start_plan' && tool.name !== 'finish_plan');
+  const canRun = tools.some((tool) => tool.name === 'run_command');
+
+  const start = await parent.hooks.subagentStart(
+    hookContext,
+    name,
+    brief(run.task, run.files, check, canRun),
+  );
+  for (const failure of start.failures) report(parent.stamp(hookFailureEvent(failure)));
+  if (start.block !== undefined)
+    return { output: `Blocked by a hook: ${start.block}`, isError: true };
+  const task = start.task;
+
+  const restriction: PermissionRestriction = {
+    ...(definition?.mode && { mode: definition.mode }),
+    ...(run.files?.length && { writable: run.files }),
+  };
+  const base = definition?.limits ?? run.settings.limits ?? DEFAULT_LIMITS;
   const session = await run.createSession({
     name,
     agentId: run.agentId,
@@ -158,21 +222,51 @@ async function runSubagent(run: {
     definition,
     instructions: run.instructions,
     tools,
-    limits: withinBudget(definition?.limits ?? run.settings.limits ?? DEFAULT_LIMITS, parent),
-    permissions: definition?.mode
-      ? parent.permissions.restricted({ mode: definition.mode })
+    limits: withinBudget(base, run.budget),
+    permissions: Object.keys(restriction).length
+      ? parent.permissions.restricted(restriction)
       : parent.permissions,
     signal,
   });
 
-  report(parent.stamp({ type: 'subagent.start', childAgentId: run.agentId, name, task }));
+  report(
+    parent.stamp({
+      type: 'subagent.start',
+      childAgentId: run.agentId,
+      name,
+      task,
+      callId: run.callId,
+    }),
+  );
+  // Its runs: the task, and once more if it reports without having made its check pass.
   let end: Extract<EngineEvent, { type: 'run.end' }> | undefined;
-  for await (const event of session.send(task, { signal })) {
-    report(event);
-    if (event.type === 'run.end' && event.agentId === run.agentId) end = event;
+  const total = {
+    turns: 0,
+    usage: emptyUsage(),
+    costUsd: undefined as number | undefined,
+  };
+  const drive = async (input: string, limits?: Partial<RunLimits>) => {
+    for await (const event of session.send(input, { signal, ...(limits && { limits }) })) {
+      report(event);
+      if (event.type !== 'run.end' || event.agentId !== run.agentId) continue;
+      end = event;
+      total.turns += event.turns;
+      total.usage = addUsage(total.usage, event.usage);
+      if (event.costUsd !== undefined) total.costUsd = (total.costUsd ?? 0) + event.costUsd;
+    }
+  };
+  await drive(task);
+  let checkNote = '';
+  if (check && canRun && end?.stopReason === 'end_turn' && !checkPassed(session.messages, check)) {
+    await drive(
+      `Before you report: run \`${check}\` and make it pass. It has not passed in this task yet.`,
+      withinBudget(base, parent.remaining()),
+    );
+    if (!checkPassed(session.messages, check)) {
+      checkNote = `\n\n[The check \`${check}\` did not pass in the sub-agent; run it yourself.]`;
+    }
   }
   const stopReason = end?.stopReason ?? 'error';
-  const usage = end?.usage ?? emptyUsage();
 
   const text = lastAnswer(session.messages) || '(The sub-agent finished without a report.)';
   const finished = await parent.hooks.subagentEnd(hookContext, {
@@ -180,7 +274,7 @@ async function runSubagent(run: {
     task,
     result: text,
     stopReason,
-    usage,
+    usage: total.usage,
   });
   for (const failure of finished.failures) report(parent.stamp(hookFailureEvent(failure)));
   report(
@@ -189,18 +283,96 @@ async function runSubagent(run: {
       childAgentId: run.agentId,
       name,
       stopReason,
-      turns: end?.turns ?? 0,
-      usage,
-      ...(end?.costUsd !== undefined && { costUsd: end.costUsd }),
+      turns: total.turns,
+      usage: total.usage,
+      ...(total.costUsd !== undefined && { costUsd: total.costUsd }),
     }),
   );
   const early = STOPPED_EARLY[stopReason];
   return {
-    output: early
-      ? `${finished.result}\n\n[The sub-agent ${early}, so its report may be incomplete.]`
-      : finished.result,
+    output:
+      (early
+        ? `${finished.result}\n\n[The sub-agent ${early}, so its report may be incomplete.]`
+        : finished.result) + checkNote,
     isError: stopReason === 'error',
   };
+}
+
+/** The task as the sub-agent gets it: with its files and its check, when given. */
+function brief(
+  task: string,
+  files: string[] | undefined,
+  check: string | undefined,
+  canRun: boolean,
+): string {
+  const parts = [task];
+  if (files?.length) {
+    parts.push(`Files you may change: ${files.join(', ')}. Changes to other files are denied.`);
+  }
+  if (check) {
+    parts.push(
+      canRun
+        ? `Done when \`${check}\` passes: run it and make it pass before you report.`
+        : `When you report, the agent that gave you this task runs \`${check}\`.`,
+    );
+  }
+  return parts.join('\n\n');
+}
+
+/** Whether the last run of `check` in this conversation passed (alone or chained with others). */
+function checkPassed(messages: Message[], check: string): boolean {
+  const wanted = check.trim().replace(/\s+/g, ' ');
+  const runsCheck = new Set<string>();
+  let passed = false;
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === 'tool-call' && part.name === 'run_command') {
+        const command = (part.args as { command?: unknown } | undefined)?.command;
+        const commands = typeof command === 'string' ? (splitCommands(command) ?? []) : [];
+        if (commands.some(({ text }) => text.replace(/\s+/g, ' ') === wanted)) {
+          runsCheck.add(part.id);
+        }
+      }
+      if (part.type === 'tool-result' && runsCheck.has(part.callId)) passed = !part.isError;
+    }
+  }
+  return passed;
+}
+
+/** What each of `together` sub-agents may spend of what the run has left. */
+function shareOf(left: Budget, together: number): Budget {
+  const n = Math.max(1, together);
+  return {
+    ...(left.tokens !== undefined && { tokens: Math.floor(left.tokens / n) }),
+    ...(left.costUsd !== undefined && { costUsd: left.costUsd / n }),
+  };
+}
+
+/** Why a sub-agent is not started, when its share is too small to finish anything. */
+function tooLittle(
+  share: Budget,
+  left: Budget,
+  together: number,
+  settings: SubagentSettings,
+): string | undefined {
+  const min = { ...DEFAULT_MIN_BUDGET, ...settings.minBudget };
+  const each = together > 1 ? ` (${together} sub-agents started together share it)` : '';
+  const advice =
+    'Do the rest yourself in a few steps, or stop and tell the user what is done and what is ' +
+    'left, so they can continue in a new message.';
+  if (share.costUsd !== undefined && share.costUsd < min.costUsd) {
+    return (
+      `Not started: this message has $${(left.costUsd ?? 0).toFixed(2)} of its cost limit ` +
+      `left${each}, too little for a sub-agent to finish a task. ${advice}`
+    );
+  }
+  if (share.tokens !== undefined && share.tokens < min.tokens) {
+    return (
+      `Not started: this message has ${left.tokens ?? 0} tokens of its limit left${each}, too ` +
+      `little for a sub-agent to finish a task. ${advice}`
+    );
+  }
+  return undefined;
 }
 
 const STOPPED_EARLY: Partial<Record<StopReason, string>> = {
@@ -215,9 +387,8 @@ const STOPPED_EARLY: Partial<Record<StopReason, string>> = {
   error: 'failed',
 };
 
-/** A sub-agent's token and cost limits never exceed what its parent's run has left. */
-function withinBudget(base: Partial<RunLimits>, parent: AgentContext): Partial<RunLimits> {
-  const left = parent.remaining();
+/** A sub-agent's token and cost limits never exceed its share of what the parent has left. */
+function withinBudget(base: Partial<RunLimits>, left: Budget): Partial<RunLimits> {
   const tighter = (own: number | undefined, rest: number | undefined) =>
     own === undefined ? rest : rest === undefined ? own : Math.min(own, rest);
   const maxTokens = tighter(base.maxTokens, left.tokens);

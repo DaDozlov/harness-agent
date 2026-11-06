@@ -14,12 +14,17 @@ export interface AgentDefinition {
   description: string;
   /** Its instructions, the body of the file. */
   prompt: string;
-  /** `provider:model`. Default: the calling agent's model. */
+  /**
+   * `provider:model`, or `inherit` for the calling agent's model. Default: `subagents.model` for a
+   * sub-agent, else the calling agent's model.
+   */
   model?: string;
   /** Which of the calling agent's tools it may use. Default: all of them. */
   tools?: string[];
   /** A stricter permission mode than the caller's, e.g. `read-only`. Never a looser one. */
   mode?: PermissionMode;
+  /** How hard it thinks, for models that reason, e.g. `high` for a reviewer. Default: the config's. */
+  reasoningEffort?: ReasoningEffort;
   limits?: Partial<RunLimits>;
   /** The file it came from. */
   source: string;
@@ -32,6 +37,9 @@ export interface LoadedDefinitions<T> {
 }
 
 const NAME = /^[\w-]+$/;
+
+type ReasoningEffort = 'low' | 'medium' | 'high';
+const REASONING_EFFORTS: readonly ReasoningEffort[] = ['low', 'medium', 'high'];
 
 /** Tool names in agent files written for Claude Code, so they work here unchanged. */
 const TOOL_ALIASES: Record<string, string> = {
@@ -97,14 +105,22 @@ export function parseAgentDefinition(
   }
 
   const model = stringField(data, 'model');
-  const usableModel = model && model !== 'inherit' && model.includes(':') ? model : undefined;
-  if (model && model !== 'inherit' && !usableModel) {
-    notes.push(`model "${model}" is not provider:model, so the calling agent's model is used.`);
+  const usableModel = model === 'inherit' || model?.includes(':') ? model : undefined;
+  if (model && !usableModel) {
+    notes.push(
+      `model "${model}" is not provider:model, so it is ignored (subagents.model or the calling agent's model is used).`,
+    );
   }
 
   const mode = stringField(data, 'mode');
   if (mode && !PERMISSION_MODES.includes(mode as PermissionMode)) {
     throw new Error(`mode must be one of ${PERMISSION_MODES.join(', ')}, not "${mode}"`);
+  }
+  const effort = stringField(data, 'reasoningEffort');
+  if (effort && !REASONING_EFFORTS.includes(effort as ReasoningEffort)) {
+    throw new Error(
+      `reasoningEffort must be one of ${REASONING_EFFORTS.join(', ')}, not "${effort}"`,
+    );
   }
 
   const limits: Partial<RunLimits> = {};
@@ -126,6 +142,7 @@ export function parseAgentDefinition(
       ...(usableModel && { model: usableModel }),
       ...(tools && { tools }),
       ...(mode && { mode: mode as PermissionMode }),
+      ...(effort && { reasoningEffort: effort as ReasoningEffort }),
       ...(Object.keys(limits).length && { limits }),
       source,
     },

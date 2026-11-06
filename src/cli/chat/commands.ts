@@ -36,6 +36,19 @@ export function planPrompt(task: string): string {
 /** What `/plan go` asks the agent to do. */
 export const BUILD_PROMPT = `${PLAN_FILE} is approved. ${BUILD_INSTRUCTIONS}`;
 
+/** What `/retro [session] [notes]` asks the agent to do. */
+export function retroPrompt(args: string): string {
+  const base =
+    'Review how the work in a session went and turn what went wrong into lasting fixes: load ' +
+    'the retro skill and follow it.';
+  const [first, ...rest] = args.trim().split(/\s+/);
+  // A session id looks like 20261106-100454-dstf; a prefix of one is enough.
+  if (first && /^\d{8}(-[\w-]*)?$/.test(first)) {
+    return `${base} Session: ${first}.${rest.length ? ` Notes: ${rest.join(' ')}` : ''}`;
+  }
+  return args.trim() ? `${base} Notes: ${args.trim()}` : base;
+}
+
 export interface SlashCommand {
   name: string;
   usage?: string;
@@ -315,6 +328,16 @@ export const COMMANDS: SlashCommand[] = [
           (archived ? ` The previous plan is in ${archived}.` : ''),
       );
       send(planPrompt(task) + (archived ? ` (The previous plan was moved to ${archived}.)` : ''));
+    },
+  },
+  {
+    name: 'retro',
+    usage: '[session] [notes]',
+    description:
+      'Have the agent review a session (default: this one, else the last) and propose lasting fixes',
+    run(args, { send, print }) {
+      if (!send) return print('/retro works in the chat.');
+      send(retroPrompt(args));
     },
   },
   {

@@ -45,6 +45,7 @@ describe('sub-agents in the chat', () => {
         childAgentId: 'reviewer-1',
         name: 'reviewer',
         task: 'Review app.ts',
+        callId: 'call_1',
       },
       // The same call id as the parent's: told apart by agent.
       {
@@ -81,11 +82,119 @@ describe('sub-agents in the chat', () => {
     for (const event of events)
       state = transcriptReducer(state, { type: 'event', event: event as never });
 
+    // Where its calls begin, its calls, then the delegate call when it is done.
     expect(state.items).toMatchObject([
-      { kind: 'tool', label: 'delegate reviewer: Review app.ts', status: 'ok' },
+      { kind: 'agent', label: 'reviewer', task: 'Review app.ts' },
       { kind: 'tool', label: 'read_file app.ts', status: 'ok', agent: 'reviewer' },
+      { kind: 'tool', label: 'delegate reviewer: Review app.ts', status: 'ok' },
     ]);
-    expect(state.items).toHaveLength(2);
+    expect(state.items).toHaveLength(3);
+    expect(state.committed).toBe(3);
+  });
+
+  it('keeps the live area to the running delegate calls while parallel sub-agents work', () => {
+    const main = { sessionId: 's', agentId: 'main', timestamp: 0 };
+    const child = (n: number) => ({
+      sessionId: 's',
+      agentId: `ui-builder-${n}`,
+      parentAgentId: 'main',
+      timestamp: 0,
+    });
+    const delegate = (n: number, task: string): EngineEventBody & { agentId: string } => ({
+      ...main,
+      type: 'tool.start',
+      callId: `call_${n}`,
+      tool: 'delegate',
+      args: { agent: 'ui-builder', task },
+    });
+    const events: Array<EngineEventBody & { agentId: string }> = [
+      delegate(1, 'Companies page'),
+      delegate(2, 'Contacts page'),
+      ...[1, 2].map((n) => ({
+        ...main,
+        type: 'subagent.start' as const,
+        childAgentId: `ui-builder-${n}`,
+        name: 'ui-builder',
+        task: n === 1 ? 'Companies page' : 'Contacts page',
+        callId: `call_${n}`,
+      })),
+    ];
+    // 40 calls between them, each finished before the next starts.
+    for (let index = 0; index < 40; index++) {
+      const n = (index % 2) + 1;
+      const call = { callId: `c${index}`, tool: 'read_file' };
+      events.push(
+        { ...child(n), type: 'tool.start', ...call, args: { path: `f${index}.ts` } },
+        {
+          ...child(n),
+          type: 'tool.end',
+          ...call,
+          output: 'x',
+          status: 'ok',
+          isError: false,
+          durationMs: 1,
+        },
+      );
+    }
+    let state = createTranscript(emptyUsage());
+    for (const event of events)
+      state = transcriptReducer(state, { type: 'event', event: event as never });
+
+    // Everything finished is printed for good; only the two delegate calls are redrawn.
+    const live = state.items.slice(state.committed);
+    expect(live).toMatchObject([
+      {
+        label: 'delegate ui-builder: Companies page',
+        status: 'running',
+        progress: { agent: 'ui-builder 1', calls: 20, last: 'read_file f38.ts' },
+      },
+      {
+        label: 'delegate ui-builder: Contacts page',
+        status: 'running',
+        progress: { agent: 'ui-builder 2', calls: 20, last: 'read_file f39.ts' },
+      },
+    ]);
+    // Both are numbered from their first line on, each in its own color.
+    const done = state.items.slice(0, state.committed);
+    const headers = done.filter((item) => item.kind === 'agent');
+    expect(headers).toMatchObject([
+      { label: 'ui-builder 1', task: 'Companies page' },
+      { label: 'ui-builder 2', task: 'Contacts page' },
+    ]);
+    expect(new Set(headers.map((item) => item.color)).size).toBe(2);
+    const calls = done.filter((item) => item.kind === 'tool');
+    expect(calls).toHaveLength(40);
+    expect(calls.slice(0, 2)).toMatchObject([
+      { agent: 'ui-builder 1', agentColor: headers[0]?.color, label: 'read_file f0.ts' },
+      { agent: 'ui-builder 2', agentColor: headers[1]?.color, label: 'read_file f1.ts' },
+    ]);
+
+    // Once both are done, a sub-agent of that name is plain "ui-builder" again.
+    for (const n of [1, 2]) {
+      state = transcriptReducer(state, {
+        type: 'event',
+        event: {
+          ...main,
+          type: 'subagent.end',
+          childAgentId: `ui-builder-${n}`,
+          name: 'ui-builder',
+          stopReason: 'end_turn',
+          turns: 20,
+          usage: emptyUsage(),
+        } as never,
+      });
+    }
+    state = transcriptReducer(state, {
+      type: 'event',
+      event: {
+        ...main,
+        type: 'subagent.start',
+        childAgentId: 'ui-builder-3',
+        name: 'ui-builder',
+        task: 'Deals page',
+      } as never,
+    });
+    expect(state.items.at(-1)).toMatchObject({ kind: 'agent', label: 'ui-builder' });
   });
 
   it('/agents and /skills list what the agent can use', async () => {

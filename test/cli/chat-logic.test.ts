@@ -255,6 +255,22 @@ describe('slash commands', () => {
 });
 
 describe('approval preview', () => {
+  it('shows the first two of several edits, and how many more', () => {
+    const edit = (n: number) => ({ old_string: `old ${n}`, new_string: `new ${n}` });
+
+    expect(
+      approvalPreview('edit_file', { path: 'a.ts', edits: [edit(1), edit(2), edit(3)] }),
+    ).toEqual([
+      { text: 'Edit 1 of 3:', color: 'gray' },
+      { text: '- old 1', color: 'red' },
+      { text: '+ new 1', color: 'green' },
+      { text: 'Edit 2 of 3:', color: 'gray' },
+      { text: '- old 2', color: 'red' },
+      { text: '+ new 2', color: 'green' },
+      { text: '… 1 more edit', color: 'gray' },
+    ]);
+  });
+
   it('shows the command, the new content, or the change', () => {
     expect(approvalPreview('run_command', { command: 'npm test' })).toEqual([
       { text: '$ npm test' },

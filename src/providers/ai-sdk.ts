@@ -146,10 +146,27 @@ export function toCallOptions(
     ...(request.maxOutputTokens !== undefined && { maxOutputTokens: request.maxOutputTokens }),
     ...(request.temperature !== undefined && { temperature: request.temperature }),
     ...(request.reasoningEffort && { reasoning: request.reasoningEffort }),
-    ...(request.providerOptions && {
-      providerOptions: request.providerOptions as ProviderOptions,
-    }),
+    ...providerOptionsOf(request),
     ...(signal && { abortSignal: signal }),
+  };
+}
+
+/**
+ * The request's provider options, with its cache key as OpenAI's `promptCacheKey` (Azure reads
+ * it under its own name). Other providers ignore options that are not theirs.
+ */
+function providerOptionsOf(request: ModelRequest): { providerOptions?: ProviderOptions } {
+  const given = request.providerOptions ?? {};
+  if (!request.cacheKey) {
+    return request.providerOptions ? { providerOptions: given as ProviderOptions } : {};
+  }
+  const keyed = (name: string) => ({ promptCacheKey: request.cacheKey, ...given[name] });
+  return {
+    providerOptions: {
+      ...given,
+      openai: keyed('openai'),
+      azure: keyed('azure'),
+    },
   };
 }
 

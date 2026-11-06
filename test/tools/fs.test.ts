@@ -1,5 +1,6 @@
 import { utimes } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { forgetSeen } from '../../src/core/tools.js';
 import {
   editFile,
   findIgnoringLineEndings,
@@ -20,6 +21,28 @@ async function setup(files: Record<string, string | Buffer> = {}) {
 }
 
 describe('read_file', () => {
+  it('points to the earlier result when the same lines of an unchanged file are read again', async () => {
+    const { context, workspace } = await setup({ 'a.txt': 'one\ntwo\n' });
+    const read = async (args: Record<string, unknown> = {}) =>
+      (await callTool(readFile, { path: 'a.txt', ...args }, context)).output;
+
+    const first = await read();
+    expect(first).toBe('     1\tone\n     2\ttwo');
+    expect(await read()).toBe(
+      'a.txt is unchanged since you read these lines earlier in this conversation; that ' +
+        'result still has its content. Read it again only if you need it repeated.',
+    );
+    // Asked again, it comes: the model may need it after all.
+    expect(await read()).toBe(first);
+    // Other lines, a changed file, and a compacted conversation get the content.
+    expect(await read({ offset: 2 })).toBe('     2\ttwo');
+    await workspace.writeFile('a.txt', 'one\nTWO\n');
+    expect(await read()).toBe('     1\tone\n     2\tTWO');
+    expect(await read()).toContain('is unchanged');
+    forgetSeen(context.state);
+    expect(await read()).toBe('     1\tone\n     2\tTWO');
+  });
+
   it('returns numbered lines', async () => {
     const { context } = await setup({ 'a.txt': 'one\ntwo\n' });
 
@@ -138,6 +161,56 @@ describe('edit_file', () => {
     expect(after).toBe('const a = 1;\nconst b = 3;\n');
     expect(result.output).toBe(
       'Edited f.ts: replaced 1 occurrence.\n     1\tconst a = 1;\n     2\tconst b = 3;\n     3\t',
+    );
+  });
+
+  it('applies several edits to one file in one call, in order', async () => {
+    const { result, after } = await readThenEdit('const a = 1;\nconst b = 2;\nconst c = 3;\n', {
+      edits: [
+        { old_string: 'const a = 1;', new_string: 'const a = 10;' },
+        { old_string: 'const c = 3;', new_string: 'const c = 30;' },
+        // Each edit sees the result of the ones before.
+        { old_string: 'const a = 10;', new_string: 'const a = 100;' },
+      ],
+    });
+
+    expect(after).toBe('const a = 100;\nconst b = 2;\nconst c = 30;\n');
+    expect(result.output).toMatch(/^Edited f\.ts: applied 3 edits\.\nEdit 1:\n/);
+    expect(result.output).toContain('Edit 3:\n     1\tconst a = 100;');
+  });
+
+  it('writes nothing when one of several edits does not apply, and says which', async () => {
+    const { workspace, context } = await setup({ 'f.ts': 'const a = 1;\n' });
+    await callTool(readFile, { path: 'f.ts' }, context);
+
+    await expect(
+      callTool(
+        editFile,
+        {
+          path: 'f.ts',
+          edits: [
+            { old_string: 'const a = 1;', new_string: 'const a = 2;' },
+            { old_string: 'const z = 9;', new_string: 'const z = 8;' },
+          ],
+        },
+        context,
+      ),
+    ).rejects.toThrow('Edit 2 of 2: old_string was not found in f.ts.');
+    expect((await workspace.readFile('f.ts')).toString()).toBe('const a = 1;\n');
+    await expect(
+      callTool(
+        editFile,
+        {
+          path: 'f.ts',
+          old_string: 'a',
+          new_string: 'b',
+          edits: [{ old_string: 'a', new_string: 'b' }],
+        },
+        context,
+      ),
+    ).rejects.toThrow('Give either old_string and new_string, or edits, not both.');
+    await expect(callTool(editFile, { path: 'f.ts', old_string: 'a' }, context)).rejects.toThrow(
+      'Give old_string and new_string, or a list of changes in edits.',
     );
   });
 

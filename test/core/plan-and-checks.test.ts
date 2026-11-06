@@ -191,12 +191,19 @@ describe('the agent deciding to plan', () => {
     await collect(engine.session().send('hi'));
     await engine.dispose();
 
-    expect(BUILT_IN_SKILLS.map((skill) => skill.name)).toEqual(['setup-harness', 'plan-work']);
+    expect(BUILT_IN_SKILLS.map((skill) => skill.name)).toEqual([
+      'setup-harness',
+      'plan-work',
+      'retro',
+    ]);
     expect(BUILT_IN_SKILLS[1]?.content).toContain('finish_plan');
     const system = model.requests[0]?.system ?? '';
     // No plan tools in this engine, so planning happens in the conversation.
     expect(system).toContain('Plan before building anything bigger than a few files');
     expect(system).toContain('Build in small steps');
     expect(system).toContain('do not fake or work around it');
+    // Always, not only with a plan: changes together, and what to check in a user interface.
+    expect(system).toContain('Make independent changes together');
+    expect(system).toContain('Tests do not see layout.');
   });
 });

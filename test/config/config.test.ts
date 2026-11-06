@@ -153,6 +153,22 @@ describe('validateConfig', () => {
     expect(message).toContain('colour: unknown setting.');
   });
 
+  it('accepts the sub-agent settings the docs name', () => {
+    const settings = {
+      subagents: {
+        maxDepth: 1,
+        maxParallel: 2,
+        limits: { maxTurns: 20 },
+        model: 'azure:small',
+        minBudget: { costUsd: 0.2, tokens: 10_000 },
+      },
+    };
+    expect(validateConfig(settings, 'f')).toEqual(settings);
+    expect(
+      messageOf(() => validateConfig({ subagents: { minBudget: { dollars: 1 } } }, 'f')),
+    ).toContain('subagents.minBudget');
+  });
+
   it('accepts env() references and rejects other objects as settings', () => {
     expect(validateConfig({ providers: { azure: { apiKey: env('KEY') } } }, 'f')).toBeTruthy();
     expect(

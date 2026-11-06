@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { ToolContext } from '../core/tools.js';
+import { CONTEXT_STATE_PREFIX, type ToolContext } from '../core/tools.js';
 import { defineTool } from './define.js';
 
 const MAX_LINES = 2_000;
@@ -43,6 +44,28 @@ async function rememberRead(path: string, context: ToolContext): Promise<void> {
   if (info) readFiles(context).set(context.workspace.resolve(path), info.mtimeMs);
 }
 
+interface ShownRead {
+  /** The file's content hash when it was shown. */
+  hash: string;
+  /** Whether the last identical read got the "unchanged" note instead of the content. */
+  noted: boolean;
+}
+
+/**
+ * The reads whose content the model was shown, by file and range. Reading the same lines of an
+ * unchanged file again would add the same content to the conversation (and pay for it on every
+ * later turn); the result says so instead. Cleared on compaction (`CONTEXT_STATE_PREFIX`).
+ */
+function shownReads(context: ToolContext): Map<string, ShownRead> {
+  const key = `${CONTEXT_STATE_PREFIX}fs.shownReads`;
+  let reads = context.state.get(key) as Map<string, ShownRead> | undefined;
+  if (!reads) {
+    reads = new Map();
+    context.state.set(key, reads);
+  }
+  return reads;
+}
+
 const BOM = '\uFEFF';
 
 export const readFile = defineTool({
@@ -74,6 +97,19 @@ export const readFile = defineTool({
 
     const buffer = await workspace.readFile(path);
     await rememberRead(path, context);
+    // The same lines of an unchanged file: point to the earlier result, once. Asked again, the
+    // content comes (the model may need it after all).
+    const readKey = `${workspace.resolve(path)}:${offset}:${limit}`;
+    const hash = createHash('sha1').update(buffer).digest('hex');
+    const earlier = shownReads(context).get(readKey);
+    if (earlier?.hash === hash && !earlier.noted) {
+      earlier.noted = true;
+      return (
+        `${shown} is unchanged since you read these lines earlier in this conversation; that ` +
+        'result still has its content. Read it again only if you need it repeated.'
+      );
+    }
+    shownReads(context).set(readKey, { hash, noted: false });
     if (buffer.subarray(0, 8_000).includes(0)) {
       return `${shown} is a binary file (${info.size} bytes) and is not shown.`;
     }
@@ -132,69 +168,129 @@ export const writeFile = defineTool({
   },
 });
 
+const replacement = z.object({
+  old_string: z.string().describe('The exact text to replace'),
+  new_string: z.string().describe('The text to put in its place'),
+  replace_all: z.boolean().optional().describe('Replace every occurrence (default false)'),
+});
+
+/** Edits shown with their surrounding lines in the result; more are listed by line. */
+const SNIPPETS_SHOWN = 3;
+
 export const editFile = defineTool({
   name: 'edit_file',
   description:
     'Replace exact text in a file. old_string must match the file exactly, including ' +
     'indentation, and must be unique in the file unless replace_all is set; include a few ' +
     'surrounding lines to make it unique. Do not include the line-number prefixes shown by ' +
-    'read_file. The file must be read first.',
+    'read_file. The file must be read first. For several changes to one file, pass them all ' +
+    'in `edits` (applied in order, each to the result of the one before; all or none), ' +
+    'instead of one call per change.',
   kind: 'write',
   subjectType: 'path',
   parameters: z.object({
     path: pathParam,
-    old_string: z.string().describe('The exact text to replace'),
-    new_string: z.string().describe('The text to put in its place'),
+    old_string: z.string().optional().describe('The exact text to replace (one change)'),
+    new_string: z.string().optional().describe('The text to put in its place (one change)'),
     replace_all: z.boolean().optional().describe('Replace every occurrence (default false)'),
+    edits: z
+      .array(replacement)
+      .min(1)
+      .optional()
+      .describe('Several changes to this file, instead of old_string and new_string'),
   }),
   subject: (args) => args.path,
-  async run({ path, old_string, new_string, replace_all = false }, context) {
+  async run({ path, old_string, new_string, replace_all, edits }, context) {
     const { workspace } = context;
     const shown = workspace.displayPath(path);
+    const changes = changesOf({ old_string, new_string, replace_all, edits });
     const info = await workspace.stat(path);
     if (!info) throw new Error(`${shown} does not exist. Use write_file to create it.`);
     if (info.isDirectory) throw new Error(`${shown} is a directory.`);
-    if (old_string === '') throw new Error('old_string is empty. Use write_file to create a file.');
-    if (old_string === new_string) throw new Error('old_string and new_string are the same.');
     await requireFreshRead(path, context);
 
     const raw = (await workspace.readFile(path)).toString('utf8');
     const bom = raw.startsWith(BOM) ? BOM : '';
-    const content = raw.slice(bom.length);
-    const matches = findIgnoringLineEndings(content, old_string);
-    const count = matches.length;
-    if (count === 0) {
-      throw new Error(
-        `old_string was not found in ${shown}. Read the file again and copy the text exactly, ` +
-          'including whitespace and indentation.',
-      );
+    let content = raw.slice(bom.length);
+    // Each edit's lines as the file was right after it: later edits may move them.
+    const snippets: string[] = [];
+    let count = 0;
+    for (const [index, change] of changes.entries()) {
+      const which = changes.length > 1 ? `Edit ${index + 1} of ${changes.length}: ` : '';
+      const result = applyChange(content, change, (problem) => `${which}${problem} in ${shown}`);
+      content = result.content;
+      count = result.applied.count;
+      snippets.push(snippet(content, result.applied.line, result.applied.lines));
     }
-    if (count > 1 && !replace_all) {
-      throw new Error(
-        `old_string occurs ${count} times in ${shown}. Include more surrounding lines to make it ` +
-          'unique, or set replace_all to replace every occurrence.',
-      );
-    }
-
-    // Replace from the end, so earlier match positions stay valid.
-    const chosen = replace_all ? matches : matches.slice(0, 1);
-    let updated = content;
-    for (const match of [...chosen].reverse()) {
-      const replacement = withLineEndingsOf(new_string, match.text, content);
-      updated =
-        updated.slice(0, match.index) +
-        replacement +
-        updated.slice(match.index + match.text.length);
-    }
-    await workspace.writeFile(path, bom + updated);
+    await workspace.writeFile(path, bom + content);
     await rememberRead(path, context);
 
-    const first = chosen[0]!;
-    const startLine = content.slice(0, first.index).split('\n').length;
-    const changedLines = new_string.split('\n').length;
-    return `Edited ${shown}: replaced ${chosen.length} occurrence${chosen.length === 1 ? '' : 's'}.\n${snippet(updated, startLine, changedLines)}`;
+    if (changes.length === 1) {
+      return `Edited ${shown}: replaced ${count} occurrence${count === 1 ? '' : 's'}.\n${snippets[0]}`;
+    }
+    const shownSnippets = snippets
+      .slice(0, SNIPPETS_SHOWN)
+      .map((text, index) => `Edit ${index + 1}:\n${text}`);
+    const more =
+      snippets.length > SNIPPETS_SHOWN ? `\n(${snippets.length - SNIPPETS_SHOWN} more)` : '';
+    return `Edited ${shown}: applied ${snippets.length} edits.\n${shownSnippets.join('\n')}${more}`;
   },
 });
+
+type Replacement = z.infer<typeof replacement>;
+
+/** The changes a call asks for: one pair, or a list; never both or neither. */
+function changesOf(args: Partial<Replacement> & { edits?: Replacement[] | undefined }) {
+  const single = args.old_string !== undefined || args.new_string !== undefined;
+  if (args.edits && single) {
+    throw new Error('Give either old_string and new_string, or edits, not both.');
+  }
+  if (args.edits) return args.edits;
+  if (args.old_string === undefined || args.new_string === undefined) {
+    throw new Error('Give old_string and new_string, or a list of changes in edits.');
+  }
+  return [
+    { old_string: args.old_string, new_string: args.new_string, replace_all: args.replace_all },
+  ];
+}
+
+/** Applies one replacement; `where` turns a problem into the error message. */
+function applyChange(
+  content: string,
+  { old_string, new_string, replace_all = false }: Replacement,
+  where: (problem: string) => string,
+): { content: string; applied: { line: number; lines: number; count: number } } {
+  if (old_string === '') {
+    throw new Error(`${where('old_string is empty')}. Use write_file to create a file.`);
+  }
+  if (old_string === new_string)
+    throw new Error(`${where('old_string and new_string are the same')}.`);
+  const matches = findIgnoringLineEndings(content, old_string);
+  if (matches.length === 0) {
+    throw new Error(
+      `${where('old_string was not found')}. Read the file again and copy the text exactly, ` +
+        'including whitespace and indentation.',
+    );
+  }
+  if (matches.length > 1 && !replace_all) {
+    throw new Error(
+      `${where(`old_string occurs ${matches.length} times`)}. Include more surrounding lines to ` +
+        'make it unique, or set replace_all to replace every occurrence.',
+    );
+  }
+  // Replace from the end, so earlier match positions stay valid.
+  const chosen = replace_all ? matches : matches.slice(0, 1);
+  let updated = content;
+  for (const match of [...chosen].reverse()) {
+    const text = withLineEndingsOf(new_string, match.text, content);
+    updated = updated.slice(0, match.index) + text + updated.slice(match.index + match.text.length);
+  }
+  const line = content.slice(0, chosen[0]!.index).split('\n').length;
+  return {
+    content: updated,
+    applied: { line, lines: new_string.split('\n').length, count: chosen.length },
+  };
+}
 
 /**
  * Finds `target` in `content`, treating every line break as either \n or \r\n. The model sees

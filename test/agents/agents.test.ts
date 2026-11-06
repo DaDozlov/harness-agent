@@ -82,7 +82,7 @@ describe('agent definitions', () => {
       source: '/x/reviewer.md',
     });
     expect(notes).toEqual([
-      'model "sonnet" is not provider:model, so the calling agent\'s model is used.',
+      'model "sonnet" is not provider:model, so it is ignored (subagents.model or the calling agent\'s model is used).',
     ]);
   });
 
@@ -97,6 +97,15 @@ describe('agent definitions', () => {
     expect(() => parseAgentDefinition('---\ndescription: d\nmaxTurns: -1\n---', 'x.md')).toThrow(
       'maxTurns',
     );
+    expect(() =>
+      parseAgentDefinition('---\ndescription: d\nreasoningEffort: max\n---', 'x.md'),
+    ).toThrow('reasoningEffort must be one of low, medium, high');
+    expect(
+      parseAgentDefinition(
+        '---\ndescription: d\nreasoningEffort: high\nmodel: inherit\n---',
+        'x.md',
+      ).definition,
+    ).toMatchObject({ reasoningEffort: 'high', model: 'inherit' });
     expect(parseFrontmatter(`${String.fromCharCode(0xfeff)}---\r\na: 1\r\n---\r\nbody`)).toEqual({
       data: { a: 1 },
       body: 'body',
@@ -173,9 +182,17 @@ describe('delegate', () => {
     await engine.dispose();
 
     const child = model.requests[1]!;
+    // What all sub-agents share first, so their prompts start alike for the cache; its role last.
+    expect(child.system).toMatch(/^You are a sub-agent\. /);
     expect(child.system).toMatch(
-      /^You review code\. Report bugs with file:line\.\n\nYou are a sub-agent \("reviewer"\)/,
+      /## Your role: reviewer\n\nYou review code\. Report bugs with file:line\.$/,
     );
+    expect(child.cacheKey).toMatch(/:reviewer$/);
+    expect(model.requests[0]?.cacheKey).toMatch(/:main$/);
+    // It cannot run commands or ask the user for a go, so it is told neither to run checks nor
+    // to plan, and does not report what it could not run.
+    expect(child.system).toContain('You cannot run commands.');
+    expect(child.system).not.toMatch(/running the project's tests|Plan before|start_plan/);
     expect(child.tools?.map((tool) => tool.name)).toEqual(['read_file', 'grep']);
     expect(textOf(child.messages[0]!)).toBe('Review app.ts');
     expect(lastToolOutput(model.requests[3])).toBe('app.ts:1 answer should be 42.');
@@ -196,6 +213,32 @@ describe('delegate', () => {
     });
   });
 
+  it("thinks as hard as its definition says, and checks the sub-agents' model at the start", async () => {
+    const { model, engine } = await engineWith(
+      [
+        delegate({ agent: 'thinker', task: 'Find the bug' }),
+        { text: 'app.ts:1.' },
+        { text: 'Found it.' },
+      ],
+      {
+        reasoningEffort: 'low',
+        agents: [{ ...reviewer, name: 'thinker', reasoningEffort: 'high', model: 'inherit' }],
+      },
+    );
+    await collect(engine.session().send('Find the bug'));
+    await engine.dispose();
+
+    expect(model.requests.map((request) => request.reasoningEffort)).toEqual([
+      'low',
+      'high',
+      'low',
+    ]);
+    // A wrong model for sub-agents shows when heaw starts, not in the middle of a task.
+    await expect(engineWith([], { subagents: { model: 'nowhere:x' } })).rejects.toThrow(
+      'Unknown provider "nowhere"',
+    );
+  });
+
   it('gives a general sub-agent the instructions and tools it is given, never delegate at depth 1', async () => {
     const { model, engine } = await engineWith([
       delegate({
@@ -210,9 +253,7 @@ describe('delegate', () => {
     await collect(engine.session().send('go'));
     await engine.dispose();
 
-    expect(model.requests[1]?.system).toMatch(
-      /^You list files\.\n\nYou are a sub-agent \("agent"\)/,
-    );
+    expect(model.requests[1]?.system).toMatch(/## Your role: agent\n\nYou list files\.$/);
     // run_command is not one of the parent's tools, and depth 1 is the limit.
     expect(model.requests[1]?.tools?.map((tool) => tool.name)).toEqual(['list_dir']);
     expect(model.requests[0]?.tools?.map((tool) => tool.name)).toContain('delegate');
@@ -285,7 +326,7 @@ describe('delegate', () => {
         { text: 'never' },
         { text: 'done', usage: { inputTokens: 10 } },
       ],
-      { limits: { maxTokens: 1_000 } },
+      { limits: { maxTokens: 1_000 }, subagents: { minBudget: { tokens: 50 } } },
     );
 
     const events = await collect(engine.session().send('go'));
@@ -325,6 +366,158 @@ describe('delegate', () => {
     ]);
     expect(ofType(events, 'tool.end').find((event) => event.tool === 'write_file')?.status).toBe(
       'ok',
+    );
+  });
+
+  it('lets an answer "for the session" through to requests waiting at the same time', async () => {
+    // Two sub-agents ask about the same command at once. Before, the chat kept only the latest
+    // request; the first was never answered and its sub-agent waited forever.
+    const run = { toolCalls: [{ name: 'run_command', args: { command: 'git --version' } }] };
+    const { engine } = await engineWith(
+      [
+        {
+          toolCalls: [
+            { name: 'delegate', args: { task: 'Check git', tools: ['run_command'] }, id: 'd1' },
+            { name: 'delegate', args: { task: 'Check git', tools: ['run_command'] }, id: 'd2' },
+          ],
+        },
+        run,
+        run,
+        { text: 'git is there' },
+        { text: 'git is there' },
+        { text: 'done' },
+      ],
+      { interactive: true, toolsets: ['fs', 'shell', 'agents'] },
+    );
+    const session = engine.session();
+    const requests: string[] = [];
+    const answered: string[] = [];
+    const events: EngineEvent[] = [];
+
+    for await (const event of session.send('go')) {
+      events.push(event);
+      if (event.type === 'approval.request') requests.push(event.requestId);
+      // Answer only once both are waiting, the first one "for the session".
+      if (event.type === 'approval.request' && requests.length === 2) {
+        answered.push(requests[0]!);
+        session.approve(requests[0]!, { allow: true, scope: 'session' });
+      }
+    }
+    await engine.dispose();
+
+    expect(answered).toHaveLength(1);
+    expect(
+      ofType(events, 'approval.response')
+        .map((event) => event.requestId)
+        .sort(),
+    ).toEqual([...requests].sort());
+    const runs = ofType(events, 'tool.end').filter((event) => event.tool === 'run_command');
+    expect(runs.map((event) => event.status)).toEqual(['ok', 'ok']);
+    expect(session.pendingApprovals).toEqual([]);
+  });
+
+  it('splits what the run has left among sub-agents started together, and starts none on too little', async () => {
+    const { model, engine } = await engineWith(
+      [
+        {
+          toolCalls: [
+            { name: 'delegate', args: { task: 'a' }, id: 'd1' },
+            { name: 'delegate', args: { task: 'b' }, id: 'd2' },
+          ],
+          usage: { inputTokens: 1_000 },
+        },
+        { text: 'done', usage: { inputTokens: 10 } },
+      ],
+      { limits: { maxTokens: 50_000 } },
+    );
+
+    const events = await collect(engine.session().send('go'));
+    await engine.dispose();
+
+    // 49,000 tokens left: 24,500 each, below the 30,000 a sub-agent needs.
+    const outputs = ofType(events, 'tool.end').map((event) => event.output);
+    expect(outputs).toHaveLength(2);
+    for (const output of outputs) {
+      expect(output).toMatch(
+        /^Not started: this message has 49000 tokens of its limit left \(2 sub-agents started together share it\)/,
+      );
+    }
+    expect(ofType(events, 'subagent.start')).toHaveLength(0);
+    expect(model.requests).toHaveLength(2);
+  });
+
+  it('keeps a sub-agent to its files', async () => {
+    const write = (path: string) => ({ name: 'write_file', args: { path, content: 'x' } });
+    const { model, engine, workspace } = await engineWith(
+      [
+        delegate({ task: 'Build the page', tools: ['write_file'], files: ['src/deals/**'] }),
+        { toolCalls: [write('src/deals/page.ts'), write('src/app.ts')] },
+        { text: 'Wrote the page; src/app.ts was denied.' },
+        { text: 'done' },
+      ],
+      { permissions: { mode: 'accept-edits' } },
+    );
+
+    const events = await collect(engine.session().send('go'));
+    await engine.dispose();
+
+    expect(textOf(model.requests[1]!.messages[0]!)).toContain(
+      'Files you may change: src/deals/**. Changes to other files are denied.',
+    );
+    const writes = ofType(events, 'tool.end').filter((event) => event.tool === 'write_file');
+    // A denied call ends when it is checked, before the allowed one runs.
+    expect(writes.map((event) => event.status)).toEqual(['denied', 'ok']);
+    expect(writes[0]?.output).toContain('src/app.ts is outside the files this agent was given');
+    expect(await workspace.stat('src/app.ts')).toBeUndefined();
+  });
+
+  it('sends a sub-agent back once when it reports before its check passed', async () => {
+    const check = { name: 'run_command', args: { command: 'git --version' } };
+    const { model, engine } = await engineWith(
+      [
+        delegate({ task: 'Do it', tools: ['run_command'], check: 'git --version' }),
+        { text: 'Done.' },
+        { toolCalls: [check] },
+        { text: 'Done, and the check passes.' },
+        { text: 'ok' },
+      ],
+      {
+        toolsets: ['fs', 'shell', 'agents'],
+        permissions: { mode: 'accept-edits', allow: ['run_command(git --version)'] },
+      },
+    );
+
+    const events = await collect(engine.session().send('go'));
+    await engine.dispose();
+
+    expect(textOf(model.requests[1]!.messages[0]!)).toContain(
+      'Done when `git --version` passes: run it and make it pass before you report.',
+    );
+    expect(JSON.stringify(model.requests[2]?.messages.at(-1))).toContain(
+      'Before you report: run `git --version` and make it pass.',
+    );
+    expect(ofType(events, 'tool.end').find((event) => event.tool === 'delegate')?.output).toBe(
+      'Done, and the check passes.',
+    );
+    expect(ofType(events, 'subagent.end')[0]).toMatchObject({ turns: 3 });
+  });
+
+  it('says so when the check still did not pass', async () => {
+    const { engine } = await engineWith(
+      [
+        delegate({ task: 'Do it', tools: ['run_command'], check: 'git --version' }),
+        { text: 'Done.' },
+        { text: 'Done, really.' },
+        { text: 'ok' },
+      ],
+      { toolsets: ['fs', 'shell', 'agents'] },
+    );
+
+    const events = await collect(engine.session().send('go'));
+    await engine.dispose();
+
+    expect(ofType(events, 'tool.end').find((event) => event.tool === 'delegate')?.output).toBe(
+      'Done, really.\n\n[The check `git --version` did not pass in the sub-agent; run it yourself.]',
     );
   });
 

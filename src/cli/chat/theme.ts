@@ -18,6 +18,7 @@ export const glyphs = unicode
       todo: '☐',
       todoActive: '▶',
       todoDone: '☑',
+      subagent: '▸',
     }
   : {
       prompt: '>',
@@ -29,6 +30,7 @@ export const glyphs = unicode
       todo: '[ ]',
       todoActive: '[>]',
       todoDone: '[x]',
+      subagent: '>',
     };
 
 export const MODE_COLORS = {

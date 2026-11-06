@@ -43,9 +43,11 @@ describe('the setup-harness skill', () => {
     expect(builtIn.map((skill) => [skill.name, skill.shownDir])).toEqual([
       ['setup-harness', 'built into heaw'],
       ['plan-work', 'built into heaw'],
+      ['retro', 'built into heaw'],
     ]);
     expect(replaced.map((skill) => [skill.name, skill.description])).toEqual([
       ['plan-work', expect.stringContaining('plan a task')],
+      ['retro', expect.stringContaining('/retro')],
       ['setup-harness', 'Our own setup.'],
     ]);
   });

@@ -57,6 +57,45 @@ const callEcho = (
   usage,
 });
 
+describe('near a limit', () => {
+  it('asks the agent once to wrap up when the run has used 80% of a limit', async () => {
+    const { model, session } = await setup(
+      [
+        callEcho('1'),
+        callEcho('2'),
+        callEcho('3'),
+        callEcho('4'),
+        { text: 'Steps 1-4 are done; step 5 is left.' },
+      ],
+      { limits: { maxTurns: 5 } },
+    );
+
+    const events = await collect(session.send('go'));
+
+    expect(ofType(events, 'limit.near')).toMatchObject([{ limit: 'turns', used: 4, max: 5 }]);
+    expect(JSON.stringify(model.requests[3]?.messages.at(-1))).not.toContain('heaw:');
+    expect(JSON.stringify(model.requests[4]?.messages.at(-1))).toContain(
+      'heaw: this message has used 80% of its turns limit (4 of 5 turns). Finish what you are doing',
+    );
+    // It could still finish on its own instead of being cut off.
+    expect(runEnd(events)).toMatchObject({ stopReason: 'end_turn' });
+  });
+
+  it('counts the cost too', async () => {
+    const { model, session } = await setup(
+      [callEcho('1', { inputTokens: 85_000, outputTokens: 0 }), { text: 'done' }],
+      { limits: { maxTurns: 50, maxCostUsd: 1 }, capabilities: PRICED },
+    );
+
+    const events = await collect(session.send('go'));
+
+    expect(ofType(events, 'limit.near')).toMatchObject([{ limit: 'cost', used: 0.85, max: 1 }]);
+    expect(JSON.stringify(model.requests[1]?.messages.at(-1))).toContain(
+      'its cost limit ($0.85 of $1.00)',
+    );
+  });
+});
+
 describe('usage and cost', () => {
   it('prices usage, with cached input at its own price', () => {
     const usage = {

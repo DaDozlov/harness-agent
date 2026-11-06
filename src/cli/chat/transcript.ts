@@ -5,7 +5,7 @@ import { type Message, textOf } from '../../core/messages.js';
 import type { ToolStatus } from '../../core/tools.js';
 import { addUsage, type Usage } from '../../core/usage.js';
 import { type TodoItem, todosIn } from '../../tools/todo.js';
-import { formatTokens, toolLabel } from '../format.js';
+import { describeNearLimit, describeStuck, formatTokens, toolLabel } from '../format.js';
 
 function todosOf(tool: string, args: unknown): { todos?: TodoItem[] } {
   const todos = tool === 'todo_write' ? todosIn(args) : undefined;
@@ -28,14 +28,42 @@ export type TranscriptItem =
       durationMs?: number;
       /** The task list a todo_write call set, shown as a checklist. */
       todos?: TodoItem[];
-      /** The sub-agent that made the call; missing for the user's agent. */
+      /** The sub-agent that made the call, as shown (`ui-builder 2`); missing for the user's agent. */
       agent?: string;
+      agentColor?: string;
+      /** For a running delegate call: its sub-agent and how far it got. */
+      progress?: { agent: string; color: string; calls: number; last?: string };
+    }
+  /**
+   * A sub-agent started; its calls follow, indented and labelled with its name. `open` until its
+   * first call, so a namesake starting in the same turn can still number it.
+   */
+  | {
+      kind: 'agent';
+      id: string;
+      agentId: string;
+      label: string;
+      color: string;
+      task: string;
+      open: boolean;
     }
   | { kind: 'notice'; id: string; text: string; tone: 'info' | 'warning' | 'error' };
 
+/** How the chat shows a sub-agent. */
+export interface SubagentView {
+  name: string;
+  /** The name, numbered while others with the same name run (`ui-builder 2`). */
+  label: string;
+  number?: number;
+  color: string;
+  /** The delegate call that started it (its transcript key). */
+  delegate?: string;
+  running: boolean;
+}
+
 /**
  * What the chat shows. Items before `committed` are final and rendered once, above the live
- * area (Ink's <Static>); later items can still change (streaming text, running tools).
+ * area (Ink's <Static>); the others can still change (streaming text, running tools).
  */
 export interface TranscriptState {
   items: TranscriptItem[];
@@ -44,8 +72,8 @@ export interface TranscriptState {
   usage: Usage;
   /** Cost of the current session in USD; undefined while no call could be priced. */
   costUsd: number | undefined;
-  /** Names of the sub-agents seen so far, by agent id. */
-  agents: Record<string, string>;
+  /** The sub-agents seen so far, by agent id. */
+  agents: Record<string, SubagentView>;
   nextId: number;
   /** Whether the current model message arrived as deltas (then it is already on screen). */
   streamed: boolean;
@@ -110,13 +138,19 @@ const QUIET_FOR_SUBAGENTS = new Set<EngineEvent['type']>([
 const toolKey = (event: { agentId: string; callId: string }) => `${event.agentId}:${event.callId}`;
 
 function applyEvent(state: TranscriptState, event: EngineEvent): TranscriptState {
-  const agent =
-    event.parentAgentId === undefined ? undefined : (state.agents[event.agentId] ?? event.agentId);
+  const view = event.parentAgentId === undefined ? undefined : state.agents[event.agentId];
+  const agent = event.parentAgentId === undefined ? undefined : (view?.label ?? event.agentId);
   if (agent && QUIET_FOR_SUBAGENTS.has(event.type)) return state;
   const from = agent ? `${agent}: ` : '';
   switch (event.type) {
     case 'subagent.start':
-      return { ...state, agents: { ...state.agents, [event.childAgentId]: event.name } };
+      return startSubagent(state, event);
+    case 'subagent.end':
+      return withAgent(
+        closeAgentLine(state, event.childAgentId),
+        event.childAgentId,
+        (ended) => ended && { ...ended, running: false },
+      );
     case 'text.delta': {
       const last = state.items.at(-1);
       const open = last?.kind === 'assistant' && !last.done;
@@ -133,16 +167,7 @@ function applyEvent(state: TranscriptState, event: EngineEvent): TranscriptState
         : closed;
     }
     case 'tool.start':
-      return push(state, (id) => ({
-        kind: 'tool',
-        id,
-        callId: toolKey(event),
-        tool: event.tool,
-        label: toolLabel(event.tool, event.args),
-        status: 'running',
-        ...todosOf(event.tool, event.args),
-        ...(agent && { agent }),
-      }));
+      return startTool(state, event, view);
     case 'approval.request':
       return updateTool(state, toolKey(event), (item) => ({ ...item, status: 'approval' }));
     case 'approval.response':
@@ -166,6 +191,23 @@ function applyEvent(state: TranscriptState, event: EngineEvent): TranscriptState
         usage: addUsage(state.usage, event.usage),
         costUsd: event.costUsd === undefined ? state.costUsd : (state.costUsd ?? 0) + event.costUsd,
       };
+    case 'limit.near':
+      // A sub-agent near its limit wraps up and says so in its report.
+      return agent
+        ? state
+        : push(state, (id) => ({
+            kind: 'notice',
+            id,
+            tone: 'warning',
+            text: describeNearLimit(event),
+          }));
+    case 'stuck':
+      return push(state, (id) => ({
+        kind: 'notice',
+        id,
+        tone: 'warning',
+        text: from + describeStuck(event),
+      }));
     case 'compaction':
       return push(state, (id) => ({
         kind: 'notice',
@@ -201,6 +243,126 @@ function applyEvent(state: TranscriptState, event: EngineEvent): TranscriptState
     default:
       return state;
   }
+}
+
+/** Sub-agents running at the same time get different colors. */
+const AGENT_COLORS = ['magenta', 'cyan', 'yellow', 'blue', 'green'];
+
+/**
+ * A sub-agent starts: it gets a label, numbered while another with the same name runs
+ * (`ui-builder 1`, `ui-builder 2`), and a color no running sub-agent has. A line with its task
+ * marks where its calls begin, and its delegate call starts counting them.
+ */
+function startSubagent(
+  state: TranscriptState,
+  event: Extract<EngineEvent, { type: 'subagent.start' }>,
+): TranscriptState {
+  const running = Object.entries(state.agents).filter(([, view]) => view.running);
+  const namesakes = running.filter(([, view]) => view.name === event.name);
+  let next = state;
+  for (const [id, view] of namesakes.filter(([, other]) => other.number === undefined)) {
+    next = relabel(next, id, { ...view, number: 1, label: `${view.name} 1` });
+  }
+  const numbers = namesakes.map(([, view]) => view.number ?? 1);
+  const number = numbers.length ? Math.max(...numbers) + 1 : undefined;
+  const used = new Set(running.map(([, view]) => view.color));
+  const color =
+    AGENT_COLORS.find((candidate) => !used.has(candidate)) ??
+    AGENT_COLORS[Object.keys(state.agents).length % AGENT_COLORS.length]!;
+  const view: SubagentView = {
+    name: event.name,
+    label: number === undefined ? event.name : `${event.name} ${number}`,
+    ...(number !== undefined && { number }),
+    color,
+    ...(event.callId !== undefined && { delegate: toolKey({ ...event, callId: event.callId }) }),
+    running: true,
+  };
+  next = relabel(next, event.childAgentId, view);
+  return push(next, (id) => ({
+    kind: 'agent',
+    id,
+    agentId: event.childAgentId,
+    label: view.label,
+    color,
+    task: shorten(event.task, 100),
+    open: true,
+  }));
+}
+
+/** Sets how a sub-agent is shown: its line if still open, and its delegate call while that runs. */
+function relabel(state: TranscriptState, agentId: string, view: SubagentView): TranscriptState {
+  const next = mapItems(
+    withAgent(state, agentId, () => view),
+    (item) =>
+      item.kind === 'agent' && item.agentId === agentId && item.open
+        ? { ...item, label: view.label }
+        : item,
+  );
+  if (!view.delegate) return next;
+  return updateTool(next, view.delegate, (item) =>
+    item.status === 'running' || item.status === 'approval'
+      ? {
+          ...item,
+          progress: {
+            calls: item.progress?.calls ?? 0,
+            ...item.progress,
+            agent: view.label,
+            color: view.color,
+          },
+        }
+      : item,
+  );
+}
+
+/** A sub-agent's first call (or its end) fixes its line, which can then be printed for good. */
+function closeAgentLine(state: TranscriptState, agentId: string): TranscriptState {
+  const open = state.items.some(
+    (item) => item.kind === 'agent' && item.agentId === agentId && item.open,
+  );
+  return open
+    ? mapItems(state, (item) =>
+        item.kind === 'agent' && item.agentId === agentId ? { ...item, open: false } : item,
+      )
+    : state;
+}
+
+function withAgent(
+  state: TranscriptState,
+  agentId: string,
+  change: (view: SubagentView | undefined) => SubagentView | undefined,
+): TranscriptState {
+  const view = change(state.agents[agentId]);
+  return view ? { ...state, agents: { ...state.agents, [agentId]: view } } : state;
+}
+
+/** A tool call starts; a sub-agent's also counts on the delegate call that started it. */
+function startTool(
+  state: TranscriptState,
+  event: Extract<EngineEvent, { type: 'tool.start' }>,
+  view: SubagentView | undefined,
+): TranscriptState {
+  const label = toolLabel(event.tool, event.args);
+  const opened = event.parentAgentId === undefined ? state : closeAgentLine(state, event.agentId);
+  const counted = view?.delegate
+    ? updateTool(opened, view.delegate, (item) =>
+        item.progress
+          ? { ...item, progress: { ...item.progress, calls: item.progress.calls + 1, last: label } }
+          : item,
+      )
+    : opened;
+  return push(counted, (id) => ({
+    kind: 'tool',
+    id,
+    callId: toolKey(event),
+    tool: event.tool,
+    label,
+    status: 'running',
+    ...todosOf(event.tool, event.args),
+    ...(event.parentAgentId !== undefined && {
+      agent: view?.label ?? event.agentId,
+      ...(view && { agentColor: view.color }),
+    }),
+  }));
 }
 
 const STOP_NOTES: Partial<Record<StopReason, { text: string; tone: 'info' | 'warning' }>> = {
@@ -346,13 +508,28 @@ const OWN_ERRORS = new Set(['SessionSaveError', 'HookError', 'CompactionError'])
 export function isFinal(item: TranscriptItem): boolean {
   if (item.kind === 'assistant') return item.done;
   if (item.kind === 'tool') return item.status !== 'running' && item.status !== 'approval';
+  if (item.kind === 'agent') return !item.open;
   return true;
 }
 
+/**
+ * Moves final items out of the live area, also past items that are still running (a delegate
+ * call whose sub-agent works for minutes): Ink cannot redraw a live area taller than the
+ * terminal, and every update then printed a new copy of it. Running items stay below, in order.
+ */
 function commit(state: TranscriptState): TranscriptState {
-  let committed = state.committed;
-  while (committed < state.items.length && isFinal(state.items[committed]!)) committed++;
-  return committed === state.committed ? state : { ...state, committed };
+  const open = state.items.slice(state.committed);
+  const final = open.filter(isFinal);
+  if (!final.length) return state;
+  return {
+    ...state,
+    items: [
+      ...state.items.slice(0, state.committed),
+      ...final,
+      ...open.filter((item) => !isFinal(item)),
+    ],
+    committed: state.committed + final.length,
+  };
 }
 
 function push(state: TranscriptState, create: (id: string) => TranscriptItem): TranscriptState {

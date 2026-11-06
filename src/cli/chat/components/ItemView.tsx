@@ -25,9 +25,11 @@ export interface ItemViewProps {
    * taller than the terminal, so streaming text beyond it shows only its last lines.
    */
   space?: { rows: number; columns: number } | undefined;
+  /** Live delegate calls without their progress line, when the screen is short. */
+  compact?: boolean | undefined;
 }
 
-export function ItemView({ item, previous, space }: ItemViewProps) {
+export function ItemView({ item, previous, space, compact }: ItemViewProps) {
   switch (item.kind) {
     case 'user':
       return (
@@ -39,7 +41,23 @@ export function ItemView({ item, previous, space }: ItemViewProps) {
     case 'assistant':
       return <AssistantText text={item.text} space={item.done ? undefined : space} />;
     case 'tool':
-      return <ToolLine item={item} spaced={previous?.kind !== 'tool'} />;
+      return (
+        <ToolLine
+          item={item}
+          spaced={previous?.kind !== 'tool' && previous?.kind !== 'agent'}
+          compact={compact ?? false}
+        />
+      );
+    case 'agent':
+      // Where a sub-agent's calls begin; its delegate line follows when it is done.
+      return (
+        <Box marginTop={previous?.kind === 'agent' ? 0 : 1}>
+          <Text color={item.color}>
+            {glyphs.subagent} {item.label}
+          </Text>
+          <Text dimColor> {item.task}</Text>
+        </Box>
+      );
     case 'notice':
       return (
         <Box marginTop={1}>
@@ -84,11 +102,19 @@ export function lastLinesThatFit(text: string, rows: number, columns: number): s
   return start === 0 ? text : ['…', ...lines.slice(start)].join('\n');
 }
 
-function ToolLine({ item, spaced }: { item: ToolItem; spaced: boolean }) {
+function ToolLine({
+  item,
+  spaced,
+  compact,
+}: {
+  item: ToolItem;
+  spaced: boolean;
+  compact: boolean;
+}) {
   const space = item.label.indexOf(' ');
   const name = space === -1 ? item.label : item.label.slice(0, space);
   const detail = space === -1 ? '' : item.label.slice(space);
-  const below = detailLines(item);
+  const below = compact && item.status === 'running' ? [] : detailLines(item);
 
   // A sub-agent's calls sit under the delegate call that started it, with its name.
   return (
@@ -104,7 +130,7 @@ function ToolLine({ item, spaced }: { item: ToolItem; spaced: boolean }) {
           <Text color={STATUS_COLORS[item.status]}>{glyphs.bullet}</Text>
         )}
         <Text> </Text>
-        {item.agent ? <Text color="magenta">{item.agent} </Text> : null}
+        {item.agent ? <Text color={item.agentColor ?? 'magenta'}>{item.agent} </Text> : null}
         <Text bold>{name}</Text>
         <Text>{detail}</Text>
         {item.status === 'ok' && item.durationMs !== undefined && item.durationMs >= 1_000 ? (
@@ -124,6 +150,8 @@ function ToolLine({ item, spaced }: { item: ToolItem; spaced: boolean }) {
 
 function detailLines(item: ToolItem): Array<{ text: string; color?: string }> {
   switch (item.status) {
+    case 'running':
+      return item.progress ? [progressLine(item.progress)] : [];
     case 'approval':
       return [{ text: 'waiting for your approval', color: 'yellow' }];
     case 'denied':
@@ -139,6 +167,17 @@ function detailLines(item: ToolItem): Array<{ text: string; color?: string }> {
     default:
       return [];
   }
+}
+
+/** A running sub-agent in one line: who, how many calls, and the latest. */
+function progressLine(progress: NonNullable<ToolItem['progress']>): {
+  text: string;
+  color: string;
+} {
+  const calls = `${progress.calls} ${progress.calls === 1 ? 'call' : 'calls'}`;
+  const last = progress.last ? ` · ${progress.last}` : '';
+  const text = `${progress.agent} · ${calls}${last}`;
+  return { text: text.length > 120 ? `${text.slice(0, 120)}…` : text, color: progress.color };
 }
 
 const TODO_MARKS = {

@@ -150,6 +150,14 @@ const configSchema = z
         maxDepth: z.number().int().min(0).max(5).optional(),
         maxParallel: z.number().int().min(1).max(16).optional(),
         limits: limits.optional(),
+        model: z.string().min(1).optional(),
+        minBudget: z
+          .object({
+            costUsd: z.number().min(0).optional(),
+            tokens: z.number().int().min(0).optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .optional(),

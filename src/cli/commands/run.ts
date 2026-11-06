@@ -2,7 +2,13 @@ import { text } from 'node:stream/consumers';
 import type { EngineEvent, StopReason } from '../../core/events.js';
 import { createEngine, type Engine } from '../../engine.js';
 import type { Env } from '../../providers/registry.js';
-import { failureSummary, formatCost, toolLabel } from '../format.js';
+import {
+  describeNearLimit,
+  describeStuck,
+  failureSummary,
+  formatCost,
+  toolLabel,
+} from '../format.js';
 import { type AgentFlags, setupEngine, userFacingMessage } from '../setup.js';
 
 export interface Output {
@@ -169,6 +175,10 @@ function describeEvent(
         event.method === 'summary' ? 'older turns summarized' : 'old tool outputs cleared';
       return `[context] compacted ${event.beforeTokens} → ${event.afterTokens} tokens, ${how}`;
     }
+    case 'limit.near':
+      return `[limit] ${describeNearLimit(event)}`;
+    case 'stuck':
+      return `[stuck] ${describeStuck(event)}`;
     case 'subagent.start':
       return `[agent] ${event.name}: ${event.task.replace(/\s+/g, ' ').slice(0, 100)}`;
     case 'subagent.end': {

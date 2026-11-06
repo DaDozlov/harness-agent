@@ -5,7 +5,9 @@ import type { EngineEvent, EngineEventBody, StopReason } from './events.js';
 import { type HookContext, type HookFailure, hookFailureEvent, type HookRunner } from './hooks.js';
 import { type AssistantMessage, type Message, toolCallsOf, userMessage } from './messages.js';
 import type { FinishReason, ModelClient, ModelRequest, ToolSpec } from './model.js';
+import { failureKey } from './stuck.js';
 import { executeToolCalls, type ToolRuntime } from './tool-execution.js';
+import { forgetSeen } from './tools.js';
 import { addUsage, costOf, emptyUsage, type Usage } from './usage.js';
 
 export interface RetryPolicy {
@@ -13,6 +15,8 @@ export interface RetryPolicy {
   initialDelayMs: number;
   maxDelayMs: number;
 }
+
+export { failureKey };
 
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxRetries: 3,
@@ -22,6 +26,9 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 
 /** A `beforeStop` check that fails the same way this often in a row ends the run. */
 export const MAX_SAME_CHECK_FAILURES = 3;
+
+/** The share of a limit after which the agent is asked to wrap up. */
+export const NEAR_LIMIT = 0.8;
 
 /** Limits per run, i.e. per user input (docs/DESIGN.md §4.1). */
 export interface RunLimits {
@@ -63,6 +70,8 @@ export interface LoopOptions {
   intent?: string | undefined;
   /** Sent with every model call; read per call, so it can change between runs. */
   reasoningEffort?: (() => 'low' | 'medium' | 'high' | undefined) | undefined;
+  /** Sent with every model call, see `ModelRequest.cacheKey`. */
+  cacheKey?: string | undefined;
   /** Before the stop hooks: a reason to keep working, e.g. changes nothing has checked. */
   stopCheck?: (() => Promise<string | undefined> | string | undefined) | undefined;
   /** Events to add before `run.end`, e.g. links to the commits the run made. */
@@ -99,9 +108,14 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
   let usage = emptyUsage();
   let costUsd: number | undefined;
   let turns = 0;
+  const startedAt = Date.now();
   // The last check failure, to notice the agent going round in circles.
   let lastFailure: string | undefined;
   let sameFailures = 0;
+  // Whether the agent was told that the run is near a limit.
+  let warned = false;
+  // The next model call thinks harder: a check failed, or the agent is going in circles.
+  let thinkHarder = false;
 
   function* account(callUsage: Usage): Generator<EngineEvent> {
     usage = addUsage(usage, callUsage);
@@ -138,6 +152,7 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         usage = addUsage(usage, event.usage);
         if (event.costUsd !== undefined) costUsd = (costUsd ?? 0) + event.costUsd;
       }
+      if (event.type === 'stuck' && event.agentId === options.agentId) thinkHarder = true;
       yield event;
     }
   }
@@ -169,6 +184,7 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         return false;
       }
       options.messages.splice(0, options.messages.length, ...result.messages);
+      forgetSeen(options.tools.state);
       options.onCompact?.(options.messages);
       if (result.afterTokens > threshold) stuckAt = options.messages.length;
       yield stamp({
@@ -222,8 +238,11 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
       turns++;
       yield stamp({ type: 'turn.start', turn: turns });
 
-      let request = buildRequest(options);
-      if (yield* compactIfNeeded(request)) request = buildRequest(options);
+      // Finding why something fails is where more reasoning pays off, more than writing code.
+      const effort = thinkHarder && model.capabilities.reasoning ? 'high' : undefined;
+      thinkHarder = false;
+      let request = buildRequest(options, effort);
+      if (yield* compactIfNeeded(request)) request = buildRequest(options, effort);
       const adjusted = await hooks.beforeModelCall(hookContext, request, turns);
       yield* reported(adjusted.failures);
       request = adjusted.request;
@@ -265,12 +284,23 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         // Stuck, or the check cannot run here (a missing tool): only a person can help now.
         if (sameFailures >= MAX_SAME_CHECK_FAILURES) return 'check_failed';
         addMessage(userMessage(`A check before finishing reported:\n\n${verdict.feedback}`));
+        thinkHarder = true;
         continue;
       }
 
       const results = yield* countingSubagents(
         executeToolCalls(toolCalls, options.tools, stamp, signal, remaining),
       );
+      // Once per run, near a limit: ask the agent to wrap up while it still can. Added to the
+      // last result, which every provider accepts after tool calls.
+      const minutes = (Date.now() - startedAt) / 60_000;
+      const near = warned ? undefined : nearLimit(limits, { turns, usage, costUsd, minutes });
+      if (near) {
+        warned = true;
+        yield stamp({ type: 'limit.near', ...near });
+        const last = results.at(-1);
+        if (last) last.output += `\n\n[${nearLimitNote(near)}]`;
+      }
       addMessage({ role: 'tool', content: results });
     }
   }
@@ -299,32 +329,21 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
 }
 
 /**
- * A check's output without what changes on every run (timestamps, durations), so the same
- * failure looks the same. Counts stay: "4 tests failed" after "5 tests failed" is progress.
+ * The request for the next turn. Tools are read per turn: MCP servers come and go. `effort`
+ * overrides the session's reasoning effort for this one call.
  */
-export function failureKey(feedback: string): string {
-  return feedback
-    .replace(/\d{4}-\d\d-\d\d[T ][\d:.]+(Z|[+-]\d\d:?\d\d)?/g, '<time>')
-    .replace(/\b\d\d?:\d\d(:\d\d(\.\d+)?)?\b/g, '<time>')
-    .replace(/\d+(\.\d+)?\s?(ms|s|sec|seconds|m|min)\b/g, '<duration>')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(-2_000);
-}
-
-/** The request for the next turn. Tools are read per turn: MCP servers come and go. */
-function buildRequest(options: LoopOptions): ModelRequest {
+function buildRequest(options: LoopOptions, effort = options.reasoningEffort?.()): ModelRequest {
   const tools: ToolSpec[] = [...options.tools.tools().values()].map((tool) => ({
     name: tool.name,
     description: tool.description,
     inputSchema: tool.inputSchema,
   }));
-  const effort = options.reasoningEffort?.();
   return {
     system: options.system(),
     messages: [...options.messages],
     ...(tools.length && { tools }),
     ...(effort && { reasoningEffort: effort }),
+    ...(options.cacheKey && { cacheKey: options.cacheKey }),
   };
 }
 
@@ -343,6 +362,63 @@ function limitReached(
   }
   if (limits.maxCostUsd !== undefined && (costUsd ?? 0) >= limits.maxCostUsd) return 'cost_limit';
   return undefined;
+}
+
+export type NearLimit = {
+  limit: 'turns' | 'tokens' | 'cost' | 'time';
+  used: number;
+  max: number;
+};
+
+/** What a run has used so far; `minutes` of wall-clock time. */
+export interface RunSpent {
+  turns: number;
+  usage: Usage;
+  costUsd: number | undefined;
+  minutes: number;
+}
+
+/** The limit the run has used the most of, once that is past `NEAR_LIMIT`. */
+export function nearLimit(limits: RunLimits, spent: RunSpent): NearLimit | undefined {
+  const candidates: NearLimit[] = [
+    { limit: 'turns', used: spent.turns, max: limits.maxTurns },
+    ...(limits.maxTokens !== undefined
+      ? [
+          {
+            limit: 'tokens' as const,
+            used: spent.usage.inputTokens + spent.usage.outputTokens,
+            max: limits.maxTokens,
+          },
+        ]
+      : []),
+    ...(limits.maxCostUsd !== undefined
+      ? [{ limit: 'cost' as const, used: spent.costUsd ?? 0, max: limits.maxCostUsd }]
+      : []),
+    ...(limits.maxMinutes !== undefined
+      ? [{ limit: 'time' as const, used: spent.minutes, max: limits.maxMinutes }]
+      : []),
+  ];
+  const [most] = candidates
+    .filter((candidate) => candidate.max > 0 && candidate.used / candidate.max >= NEAR_LIMIT)
+    .sort((a, b) => b.used / b.max - a.used / a.max);
+  return most;
+}
+
+/** How much of a limit was used, e.g. `$4.10 of $5.00` or `41 of 50 minutes`. */
+export function nearLimitAmount({ limit, used, max }: NearLimit): string {
+  if (limit === 'cost') return `$${used.toFixed(2)} of $${max.toFixed(2)}`;
+  if (limit === 'time') return `${Math.floor(used)} of ${max} minutes`;
+  return `${used.toLocaleString('en-US')} of ${max.toLocaleString('en-US')} ${limit}`;
+}
+
+/** What the agent is told when the run is near a limit. */
+export function nearLimitNote(near: NearLimit): string {
+  return (
+    `heaw: this message has used ${Math.round((100 * near.used) / near.max)}% of its ${near.limit} limit ` +
+    `(${nearLimitAmount(near)}). Finish what you are doing in as few steps as you can, start ` +
+    'nothing big (no new sub-agents), then stop and report what is done and what is left; the ' +
+    'user can continue in a new message.'
+  );
 }
 
 /** A cost limit that cannot be checked would silently never stop anything. */

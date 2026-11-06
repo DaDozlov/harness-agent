@@ -32,11 +32,17 @@ export function ApprovalPrompt({
   request,
   agent,
   onAnswer,
+  maxPreviewLines,
+  waiting = 0,
 }: {
   request: ApprovalRequestEvent;
   /** The sub-agent asking, when it is not the user's agent. */
   agent?: string | undefined;
   onAnswer: (decision: ApprovalDecision) => void;
+  /** Lines the preview may use, so the prompt fits the screen. */
+  maxPreviewLines?: number | undefined;
+  /** Requests waiting after this one (parallel sub-agents). */
+  waiting?: number;
 }) {
   const [selected, setSelected] = useState(0);
   const [writingFeedback, setWritingFeedback] = useState(false);
@@ -69,7 +75,15 @@ export function ApprovalPrompt({
     { isActive: writingFeedback },
   );
 
-  const preview = approvalPreview(request.tool, request.args);
+  const full = approvalPreview(request.tool, request.args);
+  const max = Math.max(1, maxPreviewLines ?? full.length);
+  const preview =
+    full.length > max
+      ? [
+          ...full.slice(0, max - 1),
+          { text: `… ${full.length - max + 1} more lines`, color: 'gray' as const },
+        ]
+      : full;
   return (
     <Box
       flexDirection="column"
@@ -83,6 +97,11 @@ export function ApprovalPrompt({
         {toolLabel(request.tool, request.args)}?
       </Text>
       <Text dimColor>Asking because {request.reason}.</Text>
+      {waiting > 0 ? (
+        <Text color="yellow">
+          {waiting} more {waiting === 1 ? 'request is' : 'requests are'} waiting after this one.
+        </Text>
+      ) : null}
       {preview.length ? (
         <Box flexDirection="column" marginY={1} paddingLeft={1}>
           {preview.map((line, index) => (

@@ -20,15 +20,16 @@ import {
 import type { Message } from './messages.js';
 import type { ModelClient, ToolSpec } from './model.js';
 import { type PermissionMode, PermissionPolicy, type PermissionRules } from './permissions.js';
-import { completedTodos, PLAN_FILE, readPlanSteps } from './plan.js';
+import { completedTodos, droppedSteps, PLAN_FILE, readPlanSteps } from './plan.js';
+import { LoopDetector } from './stuck.js';
 import {
   createSessionId,
   type SessionHeader,
   type SessionRecord,
   type SessionStore,
 } from './session-store.js';
-import { executeToolCalls, type ToolRuntime } from './tool-execution.js';
-import type { Tool, ToolStatus } from './tools.js';
+import { executeToolCalls, type RequestApproval, type ToolRuntime } from './tool-execution.js';
+import { forgetSeen, type Tool, type ToolStatus } from './tools.js';
 import { DEFAULT_MAX_TOOL_OUTPUT_CHARS } from './truncate.js';
 import { addUsage, costOf, emptyUsage, type Usage } from './usage.js';
 import { type UsageBreakdown, UsageStats } from './usage-stats.js';
@@ -89,8 +90,7 @@ export interface SessionOptions {
    * Where approval requests go. A sub-agent passes them to the session that owns the
    * conversation, so the user answers them there. Default: this session's `approve`.
    */
-  requestApproval?:
-    ((request: ApprovalRequest, signal: AbortSignal) => Promise<ApprovalDecision>) | undefined;
+  requestApproval?: RequestApproval | undefined;
   /** Saves the session as it goes, so it can be resumed. */
   store?: SessionStore | undefined;
   /** Earlier messages to continue from, e.g. a restored session. */
@@ -132,6 +132,8 @@ export interface SessionOptions {
 
 export interface SendOptions {
   signal?: AbortSignal | undefined;
+  /** Limits for this message only, over the session's (e.g. what a budget has left). */
+  limits?: Partial<RunLimits> | undefined;
 }
 
 export interface CompactOptions {
@@ -166,7 +168,11 @@ export class Session {
   readonly #observe: ((event: EngineEvent) => void) | undefined;
   readonly #retry: RetryPolicy;
   readonly #tools: ToolRuntime;
-  readonly #pendingApprovals = new Map<string, (decision: ApprovalDecision) => void>();
+  /** Requests waiting for the user, with a check whether a later grant made them unnecessary. */
+  readonly #pendingApprovals = new Map<
+    string,
+    { resolve: (decision: ApprovalDecision) => void; allowedNow?: (() => boolean) | undefined }
+  >();
   readonly #store: SessionStore | undefined;
   readonly #beforeRun: (() => Promise<void>) | undefined;
   readonly #cwd: string;
@@ -194,6 +200,11 @@ export class Session {
   /** Steps done when the run started, and when the agent was last sent back to the plan. */
   #stepsAtStart = 0;
   #nudgedAt: number | undefined;
+  /** The plan's steps as approved (read again at each run), to notice steps the agent drops. */
+  #approvedSteps: Promise<string[]> | undefined;
+  /** Dropped steps the agent was told about in this run. */
+  readonly #droppedTold = new Set<string>();
+  readonly #depth: number;
   #model: ModelClient;
   #usage: Usage;
   #costUsd: number | undefined;
@@ -237,6 +248,7 @@ export class Session {
     this.#stats = options.stats ?? new UsageStats();
     this.#remindToVerify = options.remindToVerify ?? false;
     this.#reasoningEffort = options.reasoningEffort;
+    this.#depth = options.depth ?? 0;
     this.#observe = options.observe;
     this.#retry = { ...DEFAULT_RETRY_POLICY, ...options.retry };
     this.permissions =
@@ -255,9 +267,9 @@ export class Session {
     }
     const listTools = Array.isArray(toolOption) ? () => toolOption : toolOption;
     const interactive = options.interactive ?? true;
-    const requestApproval =
+    const requestApproval: RequestApproval =
       options.requestApproval ??
-      ((request: ApprovalRequest, signal: AbortSignal) => this.#waitForApproval(request, signal));
+      ((request, signal, allowedNow) => this.#waitForApproval(request, signal, allowedNow));
     // eslint-disable-next-line @typescript-eslint/no-this-alias -- read by the getter below
     const session = this;
 
@@ -271,6 +283,8 @@ export class Session {
       maxOutputChars: options.maxToolOutputChars ?? DEFAULT_MAX_TOOL_OUTPUT_CHARS,
       outputDir: `.heaw/sessions/${this.id}/outputs`,
       changes: this.#changes,
+      loops: new LoopDetector(this.#workspace),
+      afterWrite: (path) => this.#checkPlan(path),
       hooks: { runner: this.#hooks, context: (signal) => this.#hookContext(signal) },
       agent: {
         id: this.agentId,
@@ -407,6 +421,7 @@ export class Session {
   buildPlan(): void {
     this.#building = true;
     this.#buildApproved = true;
+    this.#approvedSteps = this.#readSteps();
   }
 
   /** Continues another session's plan mode or plan build, e.g. after `/reload`. */
@@ -443,6 +458,7 @@ export class Session {
     this.#running = true;
     try {
       await this.#beforeRun?.();
+      const first = !this.#started;
       yield* this.#start(options.signal);
       if (this.#ownsChanges) this.#changes.startRun(input);
       const base = await this.#gitBase();
@@ -450,7 +466,12 @@ export class Session {
       this.#ranCommands = false;
       this.#reminded = false;
       this.#nudgedAt = undefined;
+      this.#tools.loops?.reset();
       this.#stepsAtStart = this.#building ? await this.#planProgress() : 0;
+      // Changes the user made to the plan between runs are theirs to make.
+      if (this.#building) this.#approvedSteps = this.#readSteps();
+      this.#droppedTold.clear();
+      if (first) await this.#tellOpenPlan();
       const notes = this.#notes.splice(0).map(
         (note) => `[${note}]
 
@@ -462,7 +483,7 @@ export class Session {
         system: this.#system,
         messages: this.messages,
         input: notes.join('') + input,
-        limits: this.#limits,
+        limits: { ...this.#limits, ...options.limits },
         retry: this.#retry,
         tools: this.#tools,
         signal: options.signal,
@@ -477,6 +498,8 @@ export class Session {
         beforeEnd: () => this.#commitLinks(base, started),
         stopCheck: async () => this.#verifyReminder() ?? (await this.#planReminder()),
         reasoningEffort: () => this.#reasoningEffort,
+        // One per agent kind in this session: parallel sub-agents of a kind share a prompt start.
+        cacheKey: `${this.id}:${this.agentId.replace(/-\d+$/, '')}`,
       });
       this.#usage = addUsage(this.#usage, result.usage);
       if (result.costUsd !== undefined) this.#costUsd = (this.#costUsd ?? 0) + result.costUsd;
@@ -551,6 +574,7 @@ export class Session {
       });
       if (!result) return undefined;
       this.messages.splice(0, this.messages.length, ...result.messages);
+      forgetSeen(this.#tools.state);
       this.#saveCompaction(this.messages);
       this.#usage = addUsage(this.#usage, result.usage);
       const cost = costOf(result.usage, this.#model.capabilities.pricing);
@@ -739,6 +763,52 @@ export class Session {
     );
   }
 
+  async #readSteps(): Promise<string[]> {
+    return (await readPlanSteps(this.#workspace).catch(() => undefined))?.all ?? [];
+  }
+
+  /**
+   * After a write to `PLAN.md` while building it: steps the user approved that the change removed
+   * or rewrote. Models drop steps they find hard and then report the plan done.
+   */
+  async #checkPlan(path: string): Promise<string | undefined> {
+    if (!this.#building || path !== PLAN_FILE || !this.#approvedSteps) return undefined;
+    const now = await this.#readSteps();
+    const dropped = droppedSteps(await this.#approvedSteps, now).filter(
+      (step) => !this.#droppedTold.has(step),
+    );
+    if (!dropped.length) return undefined;
+    for (const step of dropped) this.#droppedTold.add(step);
+    const shown = dropped
+      .slice(0, 3)
+      .map((step) => `"${step.length > 80 ? `${step.slice(0, 80)}…` : step}"`);
+    const more = dropped.length > 3 ? `, and ${dropped.length - 3} more` : '';
+    return (
+      `heaw: this change removed or rewrote ${dropped.length === 1 ? 'a step' : `${dropped.length} steps`} ` +
+      `of ${PLAN_FILE} that the user approved: ${shown.join(', ')}${more}. Keep approved steps as ` +
+      'they are: tick a step when it is done, and add notes or new steps after it. If a step ' +
+      'turned out wrong or impossible, put it back and tell the user why in your report.'
+    );
+  }
+
+  /**
+   * At the start of a conversation: the user's agent learns of a plan with open steps, so a new
+   * conversation can go on with it (one started after a `/clear`, say) instead of starting over.
+   * Only an agent that plans: a reviewer a hook starts has no business with the plan's steps.
+   */
+  async #tellOpenPlan(): Promise<void> {
+    if (this.#depth > 0 || this.#building || this.inPlanMode || this.#resumed) return;
+    if (!this.#tools.tools().has('start_plan')) return;
+    const steps = await readPlanSteps(this.#workspace).catch(() => undefined);
+    if (!steps?.open.length) return;
+    const open = steps.open.length;
+    this.#notes.push(
+      `${PLAN_FILE} has ${open} open step${open === 1 ? '' : 's'} of ${steps.all.length}; the next ` +
+        `is: ${steps.open[0]} If this message continues that work, read ${PLAN_FILE} first, go ` +
+        'on from the next open step, and tick steps as you finish them; otherwise leave it alone.',
+    );
+  }
+
   /** Ticked steps of the plan plus completed todo items. */
   async #planProgress(): Promise<number> {
     const steps = await readPlanSteps(this.#workspace);
@@ -800,15 +870,38 @@ export class Session {
       });
   }
 
-  /** Answers an `approval.request` event. The run continues once it is answered. */
+  /**
+   * Answers an `approval.request` event. The run continues once it is answered. Requests from
+   * parallel sub-agents can wait at the same time; an answer "for the session" also lets through
+   * the waiting ones it covers, each announced with its own `approval.response`.
+   */
   approve(requestId: string, decision: ApprovalDecision): void {
-    const resolve = this.#pendingApprovals.get(requestId);
-    if (!resolve) throw new Error(`No pending approval request with id ${requestId}.`);
+    const pending = this.#pendingApprovals.get(requestId);
+    if (!pending) throw new Error(`No pending approval request with id ${requestId}.`);
     this.#pendingApprovals.delete(requestId);
-    resolve(decision);
+    pending.resolve(decision);
+    // The grant is made when the waiting call resumes, after this; check the others then.
+    if (decision.allow && decision.scope === 'session') setTimeout(() => this.#recheckApprovals());
   }
 
-  #waitForApproval(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision> {
+  /** The approval requests still waiting for an answer. */
+  get pendingApprovals(): string[] {
+    return [...this.#pendingApprovals.keys()];
+  }
+
+  #recheckApprovals(): void {
+    for (const [requestId, pending] of this.#pendingApprovals) {
+      if (!pending.allowedNow?.()) continue;
+      this.#pendingApprovals.delete(requestId);
+      pending.resolve({ allow: true, scope: 'once' });
+    }
+  }
+
+  #waitForApproval(
+    request: ApprovalRequest,
+    signal: AbortSignal,
+    allowedNow?: () => boolean,
+  ): Promise<ApprovalDecision> {
     return new Promise((resolve, reject) => {
       const onAbort = () => {
         this.#pendingApprovals.delete(request.requestId);
@@ -816,9 +909,12 @@ export class Session {
       };
       if (signal.aborted) return onAbort();
       signal.addEventListener('abort', onAbort, { once: true });
-      this.#pendingApprovals.set(request.requestId, (decision) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(decision);
+      this.#pendingApprovals.set(request.requestId, {
+        resolve: (decision) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(decision);
+        },
+        allowedNow,
       });
     });
   }

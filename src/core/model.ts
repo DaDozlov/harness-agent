@@ -42,6 +42,11 @@ export interface ModelRequest {
   maxOutputTokens?: number;
   temperature?: number;
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /**
+   * Groups requests that share a long start (one agent's turns, or sub-agents of one kind), so
+   * a provider that routes by it (OpenAI, Azure OpenAI) finds their cached prompt more often.
+   */
+  cacheKey?: string;
   /** Passed through to the provider untouched, e.g. cache hints. */
   providerOptions?: Record<string, Record<string, unknown>>;
 }

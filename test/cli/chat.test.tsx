@@ -29,6 +29,7 @@ async function startApp(
   options: {
     session?: (engine: Awaited<ReturnType<typeof createEngine>>) => Promise<Session>;
     resumed?: boolean;
+    engine?: Partial<Parameters<typeof createEngine>[0]>;
   } = {},
 ) {
   const workspace = await tempWorkspace();
@@ -37,6 +38,7 @@ async function startApp(
     model,
     workspace,
     sessionStore: new JsonlSessionStore(workspace.root),
+    ...options.engine,
   });
   const session = options.session ? await options.session(engine) : engine.session();
   const ui = render(<App engine={engine} session={session} resumed={options.resumed ?? false} />);
@@ -166,6 +168,111 @@ describe('chat', () => {
 
     await app.waitFor('Interrupted.');
     expect(app.frame()).not.toContain('keeps going and going.');
+  });
+
+  it('shows parallel sub-agents apart, each with its progress on its delegate line', async () => {
+    const reads: ScriptedResponse = {
+      toolCalls: ['a', 'b', 'c', 'd', 'e'].map((name) => ({
+        name: 'read_file',
+        args: { path: `${name}.ts` },
+      })),
+    };
+    const slowReport: ScriptedResponse = {
+      text: 'Built the page and its styles.',
+      chunkSize: 2,
+      chunkDelayMs: 25,
+    };
+    const app = await startApp(
+      [
+        {
+          toolCalls: [
+            { name: 'delegate', args: { agent: 'ui-builder', task: 'Companies page' } },
+            { name: 'delegate', args: { agent: 'ui-builder', task: 'Contacts page' } },
+          ],
+        },
+        reads,
+        reads,
+        reads,
+        reads,
+        slowReport,
+        slowReport,
+        { text: 'Both pages are built.' },
+      ],
+      {
+        engine: {
+          toolsets: ['fs', 'agents'],
+          permissions: { mode: 'accept-edits' },
+          agents: [
+            {
+              name: 'ui-builder',
+              description: 'Builds pages.',
+              prompt: 'You build pages.',
+              tools: ['read_file'],
+              source: 'test',
+            },
+          ],
+        },
+      },
+    );
+    for (const name of ['a', 'b', 'c', 'd', 'e']) {
+      await app.workspace.writeFile(`${name}.ts`, `export const ${name} = 1;\n`);
+    }
+
+    await app.type('Build both pages');
+    await app.press(KEYS.enter);
+
+    // While they work: both numbered, each delegate line with its count and latest call. (Which
+    // sub-agent gets which scripted answer depends on timing, so the counts vary.)
+    const progress = (n: number) =>
+      new RegExp(`ui-builder ${n} · \\d+ calls · read_file [a-e]\\.ts`);
+    for (
+      let i = 0;
+      i < 100 && !(progress(1).test(app.frame()) && progress(2).test(app.frame()));
+      i++
+    ) {
+      await tick(20);
+    }
+    const running = app.frame();
+    expect(running).toMatch(progress(1));
+    expect(running).toMatch(progress(2));
+    expect(running).toMatch(/ui-builder 1 Companies page/);
+    expect(running).toMatch(/ui-builder 2 Contacts page/);
+    expect(running).toContain('ui-builder 1 read_file a.ts');
+
+    await app.waitFor('Both pages are built.');
+    expect(app.frame()).toMatch(/delegate ui-builder: Companies page/);
+  });
+
+  it('asks about approvals from parallel sub-agents one after the other, none lost', async () => {
+    const run = { toolCalls: [{ name: 'run_command', args: { command: 'git --version' } }] };
+    const app = await startApp(
+      [
+        {
+          toolCalls: [
+            { name: 'delegate', args: { task: 'Check git', tools: ['run_command'] }, id: 'd1' },
+            { name: 'delegate', args: { task: 'Check git', tools: ['run_command'] }, id: 'd2' },
+          ],
+        },
+        run,
+        run,
+        { text: 'git is there' },
+        { text: 'git is there' },
+        { text: 'Both sub-agents are done.' },
+      ],
+      { engine: { toolsets: ['fs', 'shell', 'agents'] } },
+    );
+
+    await app.type('Check git twice');
+    await app.press(KEYS.enter);
+
+    await app.waitFor('1 more request is waiting after this one.');
+    await app.press('y');
+    await app.waitFor('asks: allow run_command git --version?');
+    expect(app.frame()).not.toContain('more request is waiting');
+    await app.press('y');
+
+    await app.waitFor('Both sub-agents are done.');
+    expect(app.session.pendingApprovals).toEqual([]);
   });
 
   it('shows the earlier conversation when resuming', async () => {

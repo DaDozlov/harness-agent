@@ -14,6 +14,7 @@ import { createEngine, type Engine, type EngineOptions } from './engine.js';
 import { loadMcpServers } from './mcp/config.js';
 import { MCP_CREDENTIALS_DIR } from './mcp/oauth.js';
 import { telemetryFromEnv, type TelemetryOptions } from './observability/otel.js';
+import { sessionReportTool } from './observability/session-report.js';
 import type { Env } from './providers/registry.js';
 import { resolveSetting } from './providers/settings.js';
 import { JsonlSessionStore } from './sessions/jsonl-store.js';
@@ -117,6 +118,8 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
   ]);
   const limits = { ...config.limits, ...definedOnly(options.limits ?? {}) };
   const fileTools = options.tools !== false && (config.toolsets ?? DEFAULT_TOOLSETS).includes('fs');
+  // Read by session_report (the retro skill) even when new sessions are not saved.
+  const sessionFiles = new JsonlSessionStore(projectRoot, { redact });
 
   const engineOptions: EngineOptions = {
     model,
@@ -134,9 +137,14 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     ...(options.tools === false
       ? { toolsets: [] }
       : config.toolsets && { toolsets: config.toolsets }),
-    // check_config validates the project's setup as this function loads it (the setup-harness skill).
+    // check_config validates the project's setup as this function loads it (the setup-harness
+    // skill); session_report condenses saved sessions for the retro skill.
     ...(options.tools !== false && {
-      tools: [...(config.tools ?? []), checkConfigTool(() => inspectProject(options))],
+      tools: [
+        ...(config.tools ?? []),
+        checkConfigTool(() => inspectProject(options)),
+        ...(fileTools ? [sessionReportTool(sessionFiles)] : []),
+      ],
     }),
     ...(config.http && { http: config.http }),
     ...(config.providers && { providers: config.providers }),
@@ -157,7 +165,7 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     ...(options.intent && { intent: options.intent }),
     ...(config.verifyChanges !== undefined && { verifyChanges: config.verifyChanges }),
     ...(config.reasoningEffort && { reasoningEffort: config.reasoningEffort }),
-    ...(save && { sessionStore: new JsonlSessionStore(projectRoot, { redact }) }),
+    ...(save && { sessionStore: sessionFiles }),
     // No tools means no MCP tools either.
     ...(options.tools !== false && {
       mcp: {

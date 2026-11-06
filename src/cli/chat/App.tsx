@@ -14,6 +14,8 @@ import { Spinner } from './components/Spinner.js';
 import { StatusBar } from './components/StatusBar.js';
 import { EMPTY_INPUT, fromText } from './input-buffer.js';
 import { KeyboardProvider, useKeys } from './keyboard.js';
+import { fitLiveArea } from './live-area.js';
+import { approvalPreview } from './preview.js';
 import { glyphs } from './theme.js';
 import {
   createTranscript,
@@ -77,7 +79,9 @@ function ChatApp({
   );
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
-  const [approval, setApproval] = useState<ApprovalRequestEvent>();
+  // Parallel sub-agents can ask at the same time: answered one after the other, none lost.
+  const [approvals, setApprovals] = useState<ApprovalRequestEvent[]>([]);
+  const approval = approvals[0];
   const [exitArmed, setExitArmed] = useState(false);
   const [, refresh] = useReducer((count: number) => count + 1, 0);
   const abortRef = useRef<AbortController | undefined>(undefined);
@@ -156,7 +160,11 @@ function ChatApp({
         abortRef.current = controller;
         for await (const event of sessionRef.current.send(text, { signal: controller.signal })) {
           dispatch({ type: 'event', event });
-          if (event.type === 'approval.request') setApproval(event);
+          if (event.type === 'approval.request') setApprovals((queue) => [...queue, event]);
+          // Answered here, or let through by an answer "for the session" to another request.
+          if (event.type === 'approval.response') {
+            setApprovals((queue) => queue.filter((item) => item.requestId !== event.requestId));
+          }
         }
       } catch (error) {
         dispatch({
@@ -166,7 +174,7 @@ function ChatApp({
         });
       } finally {
         abortRef.current = undefined;
-        setApproval(undefined);
+        setApprovals([]);
         // What the run changed, e.g. the config /setup wrote, applies from the next message on.
         await applySetupChanges();
         runningRef.current = false;
@@ -249,8 +257,8 @@ function ChatApp({
 
   const answer = (decision: ApprovalDecision) => {
     if (!approval) return;
+    setApprovals((queue) => queue.filter((item) => item.requestId !== approval.requestId));
     sessionRef.current.approve(approval.requestId, decision);
-    setApproval(undefined);
   };
 
   useKeys((char, key) => {
@@ -278,20 +286,36 @@ function ChatApp({
   const suggestions = approval ? [] : matchCommands(input.buffer.text);
   const { rows, columns } = useWindowSize();
   const space = { rows: Math.max(4, rows - RESERVED_ROWS), columns: Math.max(20, columns - 2) };
+  const layout = fitLiveArea(
+    live,
+    space,
+    approval && {
+      previewLines: approvalPreview(approval.tool, approval.args).length,
+      waiting: approvals.length - 1,
+    },
+  );
 
   return (
     <Box flexDirection="column">
       <Static items={committed}>
         {(item, index) => <ItemView key={item.id} item={item} previous={committed[index - 1]} />}
       </Static>
-      {live.map((item, index) => (
+      {layout.items.map((item, index) => (
         <ItemView
           key={item.id}
           item={item}
-          previous={transcript.items[transcript.committed + index - 1]}
+          previous={index === 0 ? committed.at(-1) : layout.items[index - 1]}
           space={space}
+          compact={layout.compact}
         />
       ))}
+      {layout.hidden ? (
+        <Box paddingLeft={2}>
+          <Text dimColor>
+            … {layout.hidden} more {layout.hidden === 1 ? 'call' : 'calls'} running
+          </Text>
+        </Box>
+      ) : null}
       {running && !approval && !busy && !streaming ? (
         <Box marginTop={1}>
           <Spinner label="Thinking…" />
@@ -304,9 +328,11 @@ function ChatApp({
           agent={
             approval.parentAgentId === undefined
               ? undefined
-              : (transcript.agents[approval.agentId] ?? approval.agentId)
+              : (transcript.agents[approval.agentId]?.label ?? approval.agentId)
           }
           onAnswer={answer}
+          maxPreviewLines={layout.previewLines}
+          waiting={approvals.length - 1}
         />
       ) : (
         <Box borderStyle={glyphs.border} borderColor="gray" paddingX={1} marginTop={1}>

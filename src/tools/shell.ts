@@ -4,6 +4,11 @@ import { defineTool } from './define.js';
 
 const DEFAULT_TIMEOUT_SECONDS = 120;
 const MAX_TIMEOUT_SECONDS = 600;
+/**
+ * Command output the model sees: builds and test runs print far more than it needs, and what
+ * matters (errors, the summary) is usually at the end. The full output is saved to page through.
+ */
+const COMMAND_OUTPUT = { maxChars: 12_000, headShare: 0.25 };
 
 export const runCommand = defineTool({
   name: 'run_command',
@@ -16,6 +21,7 @@ export const runCommand = defineTool({
     `are stopped at the timeout (default ${DEFAULT_TIMEOUT_SECONDS} s). Prefer read_file, glob ` +
     'and grep over cat, find and grep commands.',
   kind: 'execute',
+  output: COMMAND_OUTPUT,
   parameters: z.object({
     command: z.string().describe('The command to run'),
     cwd: z.string().optional().describe('Directory to run in (default: working directory)'),

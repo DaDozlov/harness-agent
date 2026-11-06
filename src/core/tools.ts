@@ -29,6 +29,11 @@ export interface Tool {
   readonly subjectType?: 'path' | 'text' | undefined;
   /** Asked about every time, in every mode, unless approved in advance (deny rules still win). */
   readonly alwaysAsk?: boolean | undefined;
+  /**
+   * How its output is cut when too long: at most `maxChars` (below the session's limit), keeping
+   * `headShare` of it from the start and the rest from the end. The full output is saved.
+   */
+  readonly output?: { maxChars?: number; headShare?: number } | undefined;
 
   /** Validates arguments from the model. An error message goes back to the model. */
   parse(args: unknown): { ok: true; args: unknown } | { ok: false; error: string };
@@ -42,6 +47,8 @@ export interface ToolContext {
   workspace: Workspace;
   signal: AbortSignal;
   callId: string;
+  /** How many calls of this tool run together with this one (parallel calls of one turn). */
+  together?: number;
   /** Per-session storage for tools, e.g. which files have been read. Key by tool or toolset. */
   state: Map<string, unknown>;
   /** The agent running the tool, for tools that start sub-agents (`delegate`). */
@@ -63,8 +70,15 @@ export interface AgentContext {
   permissions: PermissionPolicy;
   /** Whether someone answers approval requests. */
   interactive: boolean;
-  /** Waits for the user's answer through the session that owns the conversation. */
-  requestApproval: (request: ApprovalRequest, signal: AbortSignal) => Promise<ApprovalDecision>;
+  /**
+   * Waits for the user's answer through the session that owns the conversation. `allowedNow`:
+   * whether the call no longer needs asking (another answer "for the session" covers it).
+   */
+  requestApproval: (
+    request: ApprovalRequest,
+    signal: AbortSignal,
+    allowedNow?: () => boolean,
+  ) => Promise<ApprovalDecision>;
   /** Tokens and cost the current run may still spend; missing values are unlimited. */
   remaining: () => { tokens?: number; costUsd?: number };
   hooks: HookRunner;
@@ -91,6 +105,17 @@ export interface PlanControl {
 }
 
 export type ToolOutput = string | { output: string; isError?: boolean };
+
+/**
+ * Tool state under keys with this prefix describes what the model has seen in the conversation
+ * (e.g. which file contents it was shown). It is cleared when the history is compacted, since
+ * those results may be gone then.
+ */
+export const CONTEXT_STATE_PREFIX = 'context.';
+
+export function forgetSeen(state: Map<string, unknown>): void {
+  for (const key of [...state.keys()]) if (key.startsWith(CONTEXT_STATE_PREFIX)) state.delete(key);
+}
 
 export function concurrencyOf(tool: Tool): 'parallel' | 'serial' {
   return tool.concurrency ?? (tool.kind === 'read' ? 'parallel' : 'serial');

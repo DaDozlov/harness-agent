@@ -62,8 +62,9 @@ export interface HeawConfig {
   reasoningEffort?: 'low' | 'medium' | 'high';
   /**
    * Sub-agents started with `delegate` (agents are defined in `.heaw/agents/*.md`): how deep
-   * they may nest (default 1: sub-agents cannot start their own), how many run at once (4), and
-   * the limits of each one whose definition sets none (50 turns).
+   * they may nest (default 1: sub-agents cannot start their own), how many run at once (4), the
+   * limits of each one whose definition sets none (50 turns), the model of those whose definition
+   * names none (the caller's), and the least budget one starts with ($0.50, 30,000 tokens).
    */
   subagents?: SubagentSettings;
   /**

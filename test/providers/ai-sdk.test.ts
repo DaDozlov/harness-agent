@@ -290,6 +290,21 @@ describe('toCallOptions', () => {
     });
   });
 
+  it('sends the cache key as the prompt cache key of OpenAI and Azure, keeping other options', () => {
+    const options = toCallOptions({
+      ...REQUEST,
+      cacheKey: 's1:ui-builder',
+      providerOptions: { openai: { store: false }, anthropic: { x: 1 } },
+    });
+
+    expect(options.providerOptions).toEqual({
+      openai: { promptCacheKey: 's1:ui-builder', store: false },
+      azure: { promptCacheKey: 's1:ui-builder' },
+      anthropic: { x: 1 },
+    });
+    expect(toCallOptions(REQUEST)).not.toHaveProperty('providerOptions');
+  });
+
   it('sends no tool settings when there are no tools', () => {
     const options = toCallOptions({ ...REQUEST, tools: [] });
 

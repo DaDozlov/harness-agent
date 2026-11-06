@@ -6,6 +6,7 @@ import { type HookContext, type HookFailure, hookFailureEvent, type HookRunner }
 import type { ToolCallPart, ToolResultPart } from './messages.js';
 import { type PermissionPolicy, type Subject, suggestRule } from './permissions.js';
 import { EventQueue } from './event-queue.js';
+import { type LoopDetector, type StuckSignal, stuckNote } from './stuck.js';
 import {
   type AgentContext,
   concurrencyOf,
@@ -26,13 +27,17 @@ export interface ToolRuntime {
   /** `false`: nobody can answer approval requests, so `ask` becomes `deny`. */
   interactive: boolean;
   /** Resolves when the consumer answers the request (see `Session.approve`). */
-  requestApproval: (request: ApprovalRequest, signal: AbortSignal) => Promise<ApprovalDecision>;
+  requestApproval: RequestApproval;
   state: Map<string, unknown>;
   maxOutputChars: number;
   /** Workspace-relative folder for full outputs that were truncated. */
   outputDir: string;
   /** Notes what file tools change, so a run can be rewound. */
   changes?: FileChanges | undefined;
+  /** Notices the agent going in circles; reset per run. */
+  loops?: LoopDetector | undefined;
+  /** After a tool wrote a file: a note for the model about it, if any (e.g. plan steps lost). */
+  afterWrite?: ((path: string) => Promise<string | undefined>) | undefined;
   /** `beforeToolCall` and `afterToolCall` hooks, with the context they receive. */
   hooks?: { runner: HookRunner; context: (signal: AbortSignal) => HookContext } | undefined;
   /** The agent running the tools, for tools that start sub-agents; `record` saves their events. */
@@ -43,6 +48,16 @@ export interface ToolRuntime {
 
 /** What the current run may still spend, for sub-agents' budgets. */
 export type Remaining = () => { tokens?: number; costUsd?: number };
+
+/**
+ * Waits for the user's answer. `allowedNow` tells whether the call no longer needs asking, e.g.
+ * because the user allowed a waiting request "for the session" and that covers this one too.
+ */
+export type RequestApproval = (
+  request: ApprovalRequest,
+  signal: AbortSignal,
+  allowedNow?: () => boolean,
+) => Promise<ApprovalDecision>;
 
 type Stamp = (body: EngineEventBody) => EngineEvent;
 
@@ -59,6 +74,8 @@ interface Finished {
   durationMs: number;
   /** `afterToolCall` hooks that threw. */
   failures?: HookFailure[];
+  /** The file it wrote went back to earlier content again. */
+  stuck?: StuckSignal | undefined;
 }
 
 /**
@@ -73,31 +90,42 @@ export async function* executeToolCalls(
   remaining: Remaining = () => ({}),
 ): AsyncGenerator<EngineEvent, ToolResultPart[]> {
   const results = new Map<string, ToolResultPart>();
-  const finish = (call: ToolCallPart, result: Finished): EngineEvent => {
+  function* finish(call: ToolCallPart, result: Finished): Generator<EngineEvent> {
+    // Going in circles: the agent is told on this result, the user with an event.
+    const stuck =
+      result.stuck ??
+      runtime.loops?.finished({
+        tool: call.name,
+        args: call.args,
+        output: result.output,
+        status: result.status,
+      });
+    const output = stuck ? `${result.output}\n\n[${stuckNote(stuck)}]` : result.output;
     results.set(call.id, {
       type: 'tool-result',
       callId: call.id,
       name: call.name,
-      output: result.output,
+      output,
       ...(result.status !== 'ok' && { isError: true }),
     });
-    return stamp({
+    yield stamp({
       type: 'tool.end',
       callId: call.id,
       tool: call.name,
-      output: result.output,
+      output,
       status: result.status,
       isError: result.status !== 'ok',
       durationMs: result.durationMs,
     });
-  };
+    if (stuck) yield stamp({ type: 'stuck', ...stuck });
+  }
 
   // Phase 1, in the model's order: validate and check permissions, asking where needed.
   const approved: Approved[] = [];
   for (const call of calls) {
     yield stamp({ type: 'tool.start', callId: call.id, tool: call.name, args: call.args });
     const outcome = yield* authorize(call, runtime, stamp, signal);
-    if ('finished' in outcome) yield finish(call, outcome.finished);
+    if ('finished' in outcome) yield* finish(call, outcome.finished);
     else approved.push(outcome);
   }
 
@@ -108,7 +136,7 @@ export async function* executeToolCalls(
       : yield* runBatch(batch, runtime, signal, remaining);
     for (const [index, outcome] of outcomes.entries()) {
       const { call } = batch[index]!;
-      yield finish(call, outcome);
+      yield* finish(call, outcome);
       if (outcome.status === 'ok')
         for (const url of pullRequestsIn(call, outcome.output)) {
           yield stamp({ type: 'link', kind: 'pull_request', ref: url });
@@ -128,8 +156,10 @@ async function* runBatch(
   remaining: Remaining,
 ): AsyncGenerator<EngineEvent, Finished[]> {
   const side = new EventQueue<EngineEvent>();
+  const together = (item: Approved) =>
+    batch.filter((other) => other.tool.name === item.tool.name).length;
   const running = Promise.all(
-    batch.map((item) => run(item, runtime, signal, side, remaining)),
+    batch.map((item) => run(item, runtime, signal, side, remaining, together(item))),
   ).finally(() => side.close());
   for await (const event of side) yield event;
   return running;
@@ -181,7 +211,11 @@ async function* authorize(
     forSession: runtime.permissions.describeSessionGrant(tool, subject),
   };
   // Register the request before announcing it: a consumer may answer as soon as it sees the event.
-  const answer = runtime.requestApproval(request, signal);
+  const answer = runtime.requestApproval(
+    request,
+    signal,
+    () => runtime.permissions.check(tool, subject).decision === 'allow',
+  );
   answer.catch(() => undefined); // Rejections (abort) are handled when awaited below.
   yield stamp({ type: 'approval.request', ...request });
   let decision: ApprovalDecision;
@@ -191,13 +225,16 @@ async function* authorize(
     if (signal.aborted || isAbortError(cause)) return { finished: cancelled() };
     throw cause;
   }
+  // Granted before the response is announced, so requests still waiting can be checked again.
+  if (decision.allow && decision.scope === 'session') {
+    runtime.permissions.approveForSession(tool, subject);
+  }
   yield stamp({ type: 'approval.response', requestId: request.requestId, decision });
 
   if (!decision.allow) {
     const feedback = decision.feedback ? ` Their feedback: ${decision.feedback}` : '';
     return { finished: denied(`The user denied this action.${feedback}`) };
   }
-  if (decision.scope === 'session') runtime.permissions.approveForSession(tool, subject);
   return approved;
 }
 
@@ -255,6 +292,7 @@ async function run(
   signal: AbortSignal,
   side: EventQueue<EngineEvent>,
   remaining: Remaining,
+  together: number,
 ): Promise<Finished> {
   const started = Date.now();
   const host = runtime.agent;
@@ -266,23 +304,30 @@ async function run(
       side.push(event);
     },
   };
-  const written = writtenPath(item, runtime);
+  const path = writtenPath(item);
   try {
-    if (written) await written.changes.before(written.path).catch(() => undefined);
+    if (path) {
+      await runtime.changes?.before(path).catch(() => undefined);
+      await runtime.loops?.before(path).catch(() => undefined);
+    }
     const raw: ToolOutput = await item.tool.run(item.args, {
       workspace: runtime.workspace,
       signal,
       callId: item.call.id,
+      together,
       state: runtime.state,
       agent,
     });
     const { output, isError } = typeof raw === 'string' ? { output: raw, isError: false } : raw;
     const status: ToolStatus = isError ? 'error' : 'ok';
-    if (written && !isError) written.changes.after(written.path);
-    const limited = await limitOutput(output, item.call.id, runtime);
+    const wrote = path && !isError ? path : undefined;
+    if (wrote) runtime.changes?.after(wrote);
+    const stuck = wrote ? await runtime.loops?.written(wrote).catch(() => undefined) : undefined;
+    const note = wrote ? await runtime.afterWrite?.(wrote).catch(() => undefined) : undefined;
+    const limited = (await limitOutput(output, item, runtime)) + (note ? `\n\n[${note}]` : '');
     const durationMs = Date.now() - started;
     const hooks = runtime.hooks;
-    if (!hooks?.runner.has('afterToolCall')) return { output: limited, status, durationMs };
+    if (!hooks?.runner.has('afterToolCall')) return { output: limited, status, durationMs, stuck };
     const after = await hooks.runner.afterToolCall(hooks.context(signal), {
       tool: item.tool.name,
       args: item.args,
@@ -294,6 +339,7 @@ async function run(
       status,
       durationMs,
       failures: after.failures,
+      stuck,
     };
   } catch (cause) {
     const durationMs = Date.now() - started;
@@ -317,29 +363,37 @@ function pullRequestsIn(call: ToolCallPart, output: string): string[] {
   return creates ? [...new Set(output.match(PULL_REQUEST_URL) ?? [])] : [];
 }
 
-/** The file a write tool is about to change, when changes are tracked. */
-function writtenPath(item: Approved, runtime: ToolRuntime) {
-  const { changes } = runtime;
-  if (!changes || item.tool.kind !== 'write' || item.subject?.type !== 'path') return undefined;
-  return { changes, path: item.subject.value };
+/** The file a write tool is about to change. */
+function writtenPath(item: Approved): string | undefined {
+  return item.tool.kind === 'write' && item.subject?.type === 'path'
+    ? item.subject.value
+    : undefined;
 }
 
-/** Oversized output is cut; the full text is saved so the model can page through it. */
-async function limitOutput(output: string, callId: string, runtime: ToolRuntime): Promise<string> {
-  if (output.length <= runtime.maxOutputChars) return output;
+/**
+ * Oversized output is cut; the full text is saved so the model can page through it. A tool can
+ * ask for a smaller limit and for more of the end (command output ends with what matters).
+ */
+async function limitOutput(output: string, item: Approved, runtime: ToolRuntime): Promise<string> {
+  const max = Math.min(runtime.maxOutputChars, item.tool.output?.maxChars ?? Infinity);
+  if (output.length <= max) return output;
   let savedTo: string | undefined;
   try {
-    savedTo = `${runtime.outputDir}/${callId.replace(/[^\w-]/g, '_')}.txt`;
+    savedTo = `${runtime.outputDir}/${item.call.id.replace(/[^\w-]/g, '_')}.txt`;
     await runtime.workspace.writeFile(savedTo, output);
     // Keeps saved outputs out of git even in projects that never ran `heaw init`.
     await runtime.workspace.writeFile(`${runtime.outputDir}/.gitignore`, '*\n');
   } catch {
     savedTo = undefined;
   }
-  return truncateMiddle(output, runtime.maxOutputChars, (omitted) =>
-    savedTo
-      ? `${omitted} characters omitted. The full output is in ${savedTo}; read it with read_file using offset and limit.`
-      : `${omitted} characters omitted.`,
+  return truncateMiddle(
+    output,
+    max,
+    (omitted) =>
+      savedTo
+        ? `${omitted} characters omitted. The full output is in ${savedTo}; read it with read_file using offset and limit.`
+        : `${omitted} characters omitted.`,
+    item.tool.output?.headShare,
   ).text;
 }
 

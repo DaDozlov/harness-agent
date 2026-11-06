@@ -43,6 +43,7 @@ describe('examples', () => {
     expect(options.skills?.map((skill) => skill.name)).toEqual([
       'setup-harness',
       'plan-work',
+      'retro',
       'implement-story',
     ]);
     expect(options.permissions?.deny).toContain('mcp__github__merge_pull_request');

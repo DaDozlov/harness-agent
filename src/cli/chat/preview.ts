@@ -49,15 +49,41 @@ const PREVIEWS: Record<
       ? undefined
       : limited(content.split('\n'), (line) => ({ text: line }));
   },
-  edit_file: (text) => {
+  edit_file: (text, args) => {
+    // Several edits: the first two, and how many more.
+    if (Array.isArray(args.edits)) {
+      const edits = args.edits as Array<{ old_string?: unknown; new_string?: unknown }>;
+      const shown = edits
+        .slice(0, 2)
+        .flatMap((edit, index) => [
+          { text: `Edit ${index + 1} of ${edits.length}:`, color: 'gray' as const },
+          ...changeLines(textOf(edit.old_string), textOf(edit.new_string), 3),
+        ]);
+      return edits.length > 2
+        ? [
+            ...shown,
+            {
+              text: `… ${edits.length - 2} more ${edits.length === 3 ? 'edit' : 'edits'}`,
+              color: 'gray',
+            },
+          ]
+        : shown;
+    }
     const [before, after] = [text('old_string'), text('new_string')];
     if (before === undefined || after === undefined) return undefined;
-    return [
-      ...limited(before.split('\n'), (line) => ({ text: `- ${line}`, color: 'red' }), 5),
-      ...limited(after.split('\n'), (line) => ({ text: `+ ${line}`, color: 'green' }), 5),
-    ];
+    return changeLines(before, after, 5);
   },
 };
+
+const textOf = (value: unknown) => (typeof value === 'string' ? value : '');
+
+/** A replacement as removed and added lines. */
+function changeLines(before: string, after: string, max: number): PreviewLine[] {
+  return [
+    ...limited(before.split('\n'), (line) => ({ text: `- ${line}`, color: 'red' }), max),
+    ...limited(after.split('\n'), (line) => ({ text: `+ ${line}`, color: 'green' }), max),
+  ];
+}
 
 /** What a tool call would do, for the approval prompt: the command, the content, the change. */
 export function approvalPreview(tool: string, args: unknown): PreviewLine[] {

@@ -133,8 +133,35 @@ export type EngineEventBody =
       /** heaw's own reminder (changes nothing checked, plan steps still open), not a config hook. */
       builtIn?: boolean;
     }
-  /** A sub-agent started (docs/DESIGN.md §4.7). Its own events carry `parentAgentId`. */
-  | { type: 'subagent.start'; childAgentId: string; name: string; task: string }
+  /**
+   * The run used most of a limit (`NEAR_LIMIT`), so the agent was asked to finish what it is
+   * doing and report what is left, rather than be cut off mid-step.
+   */
+  | {
+      type: 'limit.near';
+      limit: 'turns' | 'tokens' | 'cost' | 'time';
+      /** Turns, tokens, USD or minutes. */
+      used: number;
+      max: number;
+    }
+  /**
+   * The agent seems to be going in circles (docs/DESIGN.md §4.1): a call failed the same way
+   * again (`same-failure`), or a file went back to content it had earlier in the run, for the
+   * second time (`back-and-forth`). The agent was told to step back, on that call's result.
+   */
+  | {
+      type: 'stuck';
+      signal: 'same-failure' | 'back-and-forth';
+      /** The command, tool or file. */
+      subject: string;
+      /** How often it failed the same way, or went back to earlier content. */
+      count: number;
+    }
+  /**
+   * A sub-agent started (docs/DESIGN.md §4.7). Its own events carry `parentAgentId`; `callId` is
+   * the `delegate` call that started it, so a UI can show its progress on that call.
+   */
+  | { type: 'subagent.start'; childAgentId: string; name: string; task: string; callId?: string }
   | {
       type: 'subagent.end';
       childAgentId: string;

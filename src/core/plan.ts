@@ -19,15 +19,34 @@ export interface PlanSteps {
   done: number;
   /** The open steps' text, in order. */
   open: string[];
+  /** Every step's text, done or not, in order. */
+  all: string[];
 }
 
 export function planSteps(text: string): PlanSteps {
-  const steps = { done: 0, open: [] as string[] };
+  const steps: PlanSteps = { done: 0, open: [], all: [] };
   for (const match of text.matchAll(/^\s*[-*]\s+\[([ xX])\]\s+(.*)$/gm)) {
-    if (match[1] === ' ') steps.open.push(match[2]!.trim());
+    const step = match[2]!.trim();
+    steps.all.push(step);
+    if (match[1] === ' ') steps.open.push(step);
     else steps.done++;
   }
   return steps;
+}
+
+/**
+ * The approved steps that are no longer in the plan, as written or with something added (a
+ * note, strike-through or emphasis when ticked): those were removed or rewritten.
+ */
+export function droppedSteps(approved: readonly string[], current: readonly string[]): string[] {
+  const key = (step: string) =>
+    step
+      .toLowerCase()
+      .replace(/[~*_`]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  const now = current.map(key);
+  return approved.filter((step) => !now.some((text) => text.includes(key(step))));
 }
 
 /** The steps of the plan in the workspace; undefined without one. */

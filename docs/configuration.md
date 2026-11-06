@@ -24,7 +24,7 @@ export default defineConfig({ /* settings below */ });
 | `tools` | Your tools, made with `defineTool` | — |
 | `mcpServers` | Same shape as `.mcp.json`; secrets with `env('NAME')` | — |
 | `http.apis` | APIs for `http_request` by base URL: `{ headers, description }` | — |
-| `subagents` | `maxDepth`, `maxParallel`, `limits` | `1`, `4`, 50 turns |
+| `subagents` | `maxDepth`, `maxParallel`, `limits`, `model` (for sub-agents whose agent file names none, e.g. a cheaper one), `minBudget` (the least share of the run's budget a sub-agent starts with) | `1`, `4`, 50 turns, the caller's model, $0.50 / 30,000 tokens |
 | `workspace` | `type: 'local' \| 'docker'`, `shell`; Docker options below | local |
 | `telemetry` | `endpoint`, `headers`, `serviceName`, `captureContent` | off |
 | `sessions.save` | Save sessions in `.heaw/sessions/` | `true` |
@@ -51,7 +51,11 @@ heaw reads `.env` from the project root.
 
 Order: deny → approvals (`--allow`, "yes for the session") → protected files → ask → allow → mode. Protected files (`heaw.config.*`, `.mcp.json`, `.heaw/`, `.git/`) are always asked about.
 
-"Yes for the session" (**a**) allows the call, and also: after a file edit in `default` mode, all file edits (`accept-edits`); after a command, commands starting with the same words (`./mvnw -q test …`), never chained ones. Shells, interpreters and destructive programs (`python`, `node`, `docker`, `curl`, `rm`, …) are allowed only exactly. The prompt shows what it allows.
+For git commands that only read, allow `run_command(git status*)`, `run_command(git diff)` and `run_command(git diff -- *)`, not `git diff*`: `--output=<file>` writes a file, while after `--` everything is a path (`/setup` suggests these).
+
+A command line is checked command by command (`npm run build && npm test`, `a; b`, `a | b`): a deny or ask rule that matches any of them applies, and allow rules allow the line only when each command is allowed. Output piped into `head`, `tail`, `grep`, `wc`, `cut` or `tr` needs nothing. A pattern never allows a command with `$(…)` or backticks; only a rule without one (`run_command`) does.
+
+"Yes for the session" (**a**) allows the call, and also: after a file edit in `default` mode, all file edits (`accept-edits`); after a command, commands starting with the same words (`./mvnw -q test …`), for each command of a chained line. Shells, interpreters and destructive programs (`python`, `node`, `tsx`, `cross-env`, `docker`, `curl`, `rm`, …) are allowed only exactly, also behind `npx`, `npm exec` or `pnpm dlx`, and so is a line with one of them. The prompt shows what it allows.
 
 ## Hooks
 
@@ -76,14 +80,15 @@ Every hook gets `workspace` (run checks with `workspace.exec`), the session and 
 name: reviewer
 description: Reviews changes for bugs and missing tests.
 tools: [read_file, grep]        # default: all of the caller's tools
-mode: read-only                 # stricter than the caller, never looser
-model: anthropic:claude-sonnet-4-5
+mode: read-only                 # stricter than the caller, never looser; allow rules and "a" still apply
+model: anthropic:claude-sonnet-4-5  # or inherit (the caller's); default: subagents.model, else the caller's
+reasoningEffort: high           # low | medium | high; default: the config's
 maxTurns: 30                    # also maxTokens, maxCostUsd, maxMinutes
 ---
 You are a careful reviewer. …
 ```
 
-Agents: `.heaw/agents/<name>.md` (Claude Code agent files work). Skills: `<name>/SKILL.md` with `name` and `description` in `.heaw/skills/`, `.agents/skills/` or `.claude/skills/`; personal ones in `~/.heaw/`.
+Agents: `.heaw/agents/<name>.md` (Claude Code agent files work). The agent gives each sub-agent its `files` (its other writes are denied) and a `check` it must pass before it reports. Sub-agents started together share what the run's budget has left, and near 80% of a limit (turns, tokens, cost or time) the agent is asked to wrap up. Skills: `<name>/SKILL.md` with `name` and `description` in `.heaw/skills/`, `.agents/skills/` or `.claude/skills/`; personal ones in `~/.heaw/`. Built in: `setup-harness` (`/setup`), `plan-work` (`/plan`) and `retro` (`/retro [session]`: the agent reviews a session with its `session_report` tool and proposes lasting fixes).
 
 ## MCP
 

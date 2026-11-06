@@ -68,44 +68,87 @@ const PLAN_GUIDANCE = {
     'Small, clear tasks need no plan.',
 };
 
-function toolGuidance(canPlan: boolean): string {
-  return TOOL_GUIDANCE.replace('{plan}', canPlan ? PLAN_GUIDANCE.tool : PLAN_GUIDANCE.talk);
+/**
+ * How to work with the tools. The user's agent also learns how to plan (`plan`); a sub-agent
+ * plans nothing, and one that cannot run commands leaves the checks to its caller.
+ */
+function toolGuidance(options: { plan?: keyof typeof PLAN_GUIDANCE; canRun: boolean }): string {
+  return TOOL_GUIDANCE.flatMap(([line, needs]) => {
+    if (needs === 'plan') return options.plan ? [PLAN_GUIDANCE[options.plan]] : [];
+    if (needs === 'commands' && !options.canRun) return [];
+    return [line];
+  })
+    .concat(options.canRun ? [] : [NO_COMMANDS])
+    .join('\n');
 }
 
-const TOOL_GUIDANCE = [
-  'You can read and change files and run commands in the working directory with your tools.',
-  '- Look before you act: find and read the relevant files before changing them.',
-  '- Before running project commands such as tests or builds, check how this project runs ' +
-    'them (package.json scripts, Makefile, pyproject.toml, README).',
-  '- Change existing files with edit_file; use write_file for new files or full rewrites.',
-  '{plan}',
-  '- Build in small steps: first a minimal version that builds and has one passing test, then ' +
-    'one piece at a time, running the checks after each step rather than only at the end.',
-  '- Carry a task through to the end in one go: do not stop between steps to report progress ' +
-    'or to ask whether to continue. Stop early only for what only the user can give: a ' +
-    'decision, access, a missing tool.',
-  '- Check that results are right, not only that the code runs: compare outputs with what you ' +
-    'expect (values, counts, the errors that should be found).',
-  "- Verify your work, for example by running the project's tests, before saying it is done.",
-  '- When a check cannot run because something is missing from the environment (a tool, a ' +
-    'runtime, a service), stop and tell the user what is needed; do not fake or work around it.',
-  "- Some actions need the user's approval. If one is denied, do not retry it unchanged: " +
-    'adjust your approach or ask the user.',
-].join('\n');
+const TOOL_GUIDANCE: Array<[line: string, needs?: 'plan' | 'commands']> = [
+  ['You can read and change files and run commands in the working directory with your tools.'],
+  ['- Look before you act: find and read the relevant files before changing them.'],
+  [
+    '- Before running project commands such as tests or builds, check how this project runs ' +
+      'them (package.json scripts, Makefile, pyproject.toml, README).',
+    'commands',
+  ],
+  ['- Change existing files with edit_file; use write_file for new files or full rewrites.'],
+  [
+    '- Make independent changes together: several changes to one file in one edit_file call ' +
+      '(`edits`), and calls to different files in the same response. Every response costs a ' +
+      'full model call, so one change per response is slow and expensive.',
+  ],
+  ['', 'plan'],
+  [
+    '- Build in small steps: first a minimal version that builds and has one passing test, ' +
+      'then one piece at a time, running the checks after each step rather than only at the end.',
+    'commands',
+  ],
+  [
+    '- Carry a task through to the end in one go: do not stop between steps to report ' +
+      'progress or to ask whether to continue. Stop early only for what only the user can ' +
+      'give: a decision, access, a missing tool.',
+  ],
+  [
+    '- Check that results are right, not only that the code runs: compare outputs with what ' +
+      'you expect (values, counts, the errors that should be found).',
+    'commands',
+  ],
+  [
+    "- Verify your work, for example by running the project's tests, before saying it is done.",
+    'commands',
+  ],
+  [
+    '- Tests do not see layout. After changing a user interface, look at it if a tool lets you ' +
+      '(a browser or screenshot tool); otherwise say in your report exactly what to check and ' +
+      'where (which page, which part).',
+  ],
+  [
+    '- When a check cannot run because something is missing from the environment (a tool, a ' +
+      'runtime, a service), stop and tell the user what is needed; do not fake or work around it.',
+    'commands',
+  ],
+  [
+    "- Some actions need the user's approval. If one is denied, do not retry it unchanged: " +
+      'adjust your approach or ask the user.',
+  ],
+];
+
+const NO_COMMANDS =
+  '- You cannot run commands. The agent that gave you the task runs the builds and tests, so ' +
+  'do not report that you could not.';
 
 /** A general sub-agent's role, when the calling agent gives none. */
 const DEFAULT_SUBAGENT_PROMPT = 'You are a capable assistant doing a task for another agent.';
 
-/** What a sub-agent must know about its situation (docs/DESIGN.md §4.7). */
-function subagentGuidance(name: string): string {
-  return (
-    `You are a sub-agent ("${name}"). Another agent gave you one task and sees only your final ` +
-    'message, not your steps. The user does not watch you work, and you cannot ask them ' +
-    'anything. Do the task with your tools and stay within it. Then end with a complete, ' +
-    'self-contained report: what you did or found, with file paths and line numbers where ' +
-    'they help, and anything you could not do. Keep it as short as the task allows.'
-  );
-}
+/**
+ * What a sub-agent must know about its situation (docs/DESIGN.md §4.7). The same for every
+ * sub-agent, so it can start their prompts (see `createSubagentSession`).
+ */
+const SUBAGENT_GUIDANCE =
+  'You are a sub-agent. Another agent gave you one task and sees only your final message, not ' +
+  'your steps. The user does not watch you work, and you cannot ask them anything. Do the task ' +
+  'with your tools and stay within it. Then end with a complete, self-contained report: what ' +
+  'you did or found, with file paths and line numbers where they help, and anything you could ' +
+  'not do. Keep it as short as the task allows.';
 
 /** Without it, models end one-shot runs with questions or offers nobody can answer. */
 const ONE_SHOT_GUIDANCE =
@@ -345,6 +388,14 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const observe = tracer && ((event: EngineEvent) => tracer.record(event));
   const agents = options.agents ?? [];
   const subagents = options.subagents ?? {};
+  // Made now, so a wrong model or a missing price shows when heaw starts, not mid-task.
+  const subagentModel = subagents.model ? await createModel(subagents.model) : undefined;
+  /** A definition's own model, `inherit`, or the default for sub-agents (or the caller's). */
+  const modelFor = async (definition: AgentDefinition | undefined, caller: ModelClient) => {
+    const own = definition?.model;
+    if (own === 'inherit') return caller;
+    return own ? await createModel(own) : (subagentModel ?? caller);
+  };
   offerSkills();
   if (toolsets.includes('agents') && (subagents.maxDepth ?? DEFAULT_MAX_DEPTH) > 0) {
     tools.push(
@@ -404,7 +455,14 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     const environment = environmentBlock(id);
     const header = [
       options.system ?? DEFAULT_SYSTEM_PROMPT,
-      ...(tools.length ? [toolGuidance(tools.some((tool) => tool.name === 'start_plan'))] : []),
+      ...(tools.length
+        ? [
+            toolGuidance({
+              plan: tools.some((tool) => tool.name === 'start_plan') ? 'tool' : 'talk',
+              canRun: true,
+            }),
+          ]
+        : []),
       ...(interactive === false ? [ONE_SHOT_GUIDANCE] : []),
       ...(instructions ? [instructions] : []),
       ...(definition ? [definition.prompt] : []),
@@ -429,7 +487,9 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       // An agent a hook started runs only tool hooks, and cannot start more this way.
       hooks: setup.forHook ? subagentHooks : hooks,
       ...(!setup.forHook && { runAgent: hookRunAgent, remindToVerify }),
-      ...(options.reasoningEffort && { reasoningEffort: options.reasoningEffort }),
+      ...((definition?.reasoningEffort ?? options.reasoningEffort) && {
+        reasoningEffort: definition?.reasoningEffort ?? options.reasoningEffort,
+      }),
       compactAt: options.compactAt,
       store,
       id,
@@ -447,27 +507,31 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   };
 
   const createSubagentSession: CreateSubagentSession = async (spec) => {
-    const childModel = spec.definition?.model
-      ? await createModel(spec.definition.model)
-      : spec.parent.model;
+    const childModel = await modelFor(spec.definition, spec.parent.model);
+    const effort = spec.definition?.reasoningEffort ?? options.reasoningEffort;
     const environment = environmentBlock();
     const usesMcp = spec.tools.some((tool) => tool.name.startsWith('mcp__'));
     const usesSkills = spec.tools.some((tool) => tool.name === 'load_skill');
-    const header = [
-      spec.definition?.prompt || spec.instructions || DEFAULT_SUBAGENT_PROMPT,
-      subagentGuidance(spec.name),
-      ...(spec.tools.length ? [toolGuidance(false)] : []),
+    // What all sub-agents share comes first and their own role last: providers cache the start
+    // of a prompt, so parallel sub-agents reuse each other's cached start.
+    const shared = [
+      SUBAGENT_GUIDANCE,
+      ...(spec.tools.length
+        ? [toolGuidance({ canRun: spec.tools.some((tool) => tool.name === 'run_command') })]
+        : []),
       ...(instructions ? [instructions] : []),
     ];
+    const role = `## Your role: ${spec.name}\n\n${spec.definition?.prompt || spec.instructions || DEFAULT_SUBAGENT_PROMPT}`;
     return new Session({
       model: childModel,
       system: () =>
         [
-          ...header,
+          ...shared,
+          environment,
           memorySection(spec.tools.some((tool) => tool.name === 'remember')),
           usesMcp ? mcpSection() : undefined,
-          environment,
           usesSkills ? skillsIndex : undefined,
+          role,
         ]
           .filter(Boolean)
           .join('\n\n'),
@@ -478,7 +542,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       requestApproval: spec.parent.requestApproval,
       limits: spec.limits,
       hooks: subagentHooks,
-      ...(options.reasoningEffort && { reasoningEffort: options.reasoningEffort }),
+      ...(effort && { reasoningEffort: effort }),
       compactAt: options.compactAt,
       // Same conversation: events and saved outputs stay with the parent's session.
       id: spec.parent.hookContext(spec.signal).sessionId,
@@ -504,7 +568,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     }
     const session = newSession({
       definition,
-      ...(definition?.model && { model: await createModel(definition.model) }),
+      ...(definition?.model &&
+        definition.model !== 'inherit' && { model: await createModel(definition.model) }),
       interactive: false,
       ...setup,
     });

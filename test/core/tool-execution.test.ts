@@ -320,6 +320,28 @@ describe('tool execution', () => {
       (await workspace.readFile(`.heaw/sessions/${session.id}/outputs/.gitignore`)).toString(),
     ).toBe('*\n');
   });
+
+  it("cuts a tool's output at its own smaller limit, keeping mostly the end", async () => {
+    const chatty = defineTool({
+      name: 'chatty',
+      description: 'chatty',
+      kind: 'read',
+      output: { maxChars: 1_000, headShare: 0.25 },
+      parameters: z.object({}),
+      run: () => `${'a'.repeat(5_000)}${'z'.repeat(5_000)}`,
+    });
+    const { model, session } = await setup([{ toolCalls: [call('chatty', {})] }, { text: 'ok' }], {
+      tools: [chatty, ...FS_TOOLS],
+    });
+
+    await collect(session.send('Go'));
+
+    const output = (lastToolResults(model)?.[0] as { output: string }).output;
+    expect(output).toMatch(/^a{250}\n\n\[9000 characters omitted\./);
+    expect(output.endsWith(`\n\n${'z'.repeat(750)}`)).toBe(true);
+    // Commands keep a quarter from the start, three quarters from the end.
+    expect(runCommand.output).toEqual({ maxChars: 12_000, headShare: 0.25 });
+  });
 });
 
 describe('createEngine with tools', () => {

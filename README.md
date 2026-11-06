@@ -43,7 +43,7 @@ heaw
 2. Describe what you want to build. For bigger tasks it asks a few questions, writes `PLAN.md`, and builds it once you approve.
 3. Answer approvals with `y` (yes), `a` (yes for this session), `n` (no) or `f` (no, with feedback).
 
-In the chat: `/plan <task>` plans first, `/clear` starts a new conversation, `/rewind` undoes the last run's file changes, `/cost` shows the spend, `/help` lists the rest. Esc interrupts, Ctrl+C twice exits.
+In the chat: `/plan <task>` plans first, `/clear` starts a new conversation, `/rewind` undoes the last run's file changes, `/cost` shows the spend, `/retro` has the agent review a session and propose fixes for what went wrong, `/help` lists the rest. Esc interrupts, Ctrl+C twice exits.
 
 | Command | |
 |---|---|
