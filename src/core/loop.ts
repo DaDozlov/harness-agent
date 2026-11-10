@@ -126,6 +126,8 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
   let warned = false;
   // The next model call thinks harder: a check failed, or the agent is going in circles.
   let thinkHarder = false;
+  // File writes when the checks before finishing last passed with a note.
+  let passedAt: number | undefined;
 
   function* account(callUsage: Usage): Generator<EngineEvent> {
     usage = addUsage(usage, callUsage);
@@ -284,9 +286,19 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
           continue;
         }
         const edited = options.tools.changes?.edited ?? [];
+        // The checks passed with a note, and nothing changed since: the agent has given its
+        // answer with what they found, and running them again would find the same.
+        const writes = options.tools.changes?.writes ?? 0;
+        if (passedAt === writes) return 'end_turn';
         const verdict = await hooks.beforeStop(hookContext, outcome.message, turns, edited);
         for (const body of options.hookEvents?.() ?? []) yield stamp(body);
         yield* reported(verdict.failures);
+        if (!verdict.feedback && verdict.note) {
+          passedAt = writes;
+          yield stamp({ type: 'hook', hook: 'beforeStop', message: verdict.note, passed: true });
+          addMessage(userMessage(passedNote(verdict.note)));
+          continue;
+        }
         if (!verdict.feedback) return 'end_turn';
         yield stamp({ type: 'hook', hook: 'beforeStop', message: verdict.feedback });
         const failure = failureKey(verdict.feedback);
@@ -490,6 +502,17 @@ async function* callModel(
       await sleep(retryDelay(error, attempt, retry), undefined, { signal });
     }
   }
+}
+
+/** What the agent is told when the checks passed with something to report. */
+export function passedNote(note: string): string {
+  return [
+    'The checks before finishing passed and reported:',
+    '',
+    note,
+    '',
+    'Give your final answer again, with what they found: say what was checked instead of asking the user to check it. Do not start new work.',
+  ].join('\n');
 }
 
 function retryDelay(error: ModelError, attempt: number, policy: RetryPolicy): number {

@@ -21,7 +21,7 @@ export type EvalCheck =
   | { file: string; exists: boolean; contains?: string }
   /** The run took at most this many model turns: what a task should cost, not only its result. */
   | { maxTurns: number }
-  /** A tool was called at least this often, by the agent or its sub-agents, e.g. `delegate`. */
+  /** A tool ran (successfully) at least this often, the sub-agents' calls included, e.g. `delegate`. */
   | { called: string; atLeast: number }
   /** The history was compacted at least this often: the case tests work across a compaction. */
   | { compactions: number };

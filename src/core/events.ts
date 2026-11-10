@@ -132,6 +132,8 @@ export type EngineEventBody =
       message: string;
       /** heaw's own reminder (changes nothing checked, plan steps still open), not a config hook. */
       builtIn?: boolean;
+      /** A `beforeStop` check that passed with a note for the agent (not a send-back). */
+      passed?: boolean;
     }
   /**
    * The run used most of a limit (`NEAR_LIMIT`), so the agent was asked to finish what it is

@@ -231,7 +231,9 @@ function applyEvent(state: TranscriptState, event: EngineEvent): TranscriptState
           from +
           (event.builtIn
             ? `Not done yet, so the agent goes on: ${shorten(event.message, 200)}`
-            : describeHook(event.hook, event.message)),
+            : event.passed
+              ? `Checks passed; the agent adds what they found: ${shorten(event.message, 200)}`
+              : describeHook(event.hook, event.message)),
       }));
     case 'error':
       return push(state, (id) => ({

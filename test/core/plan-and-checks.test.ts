@@ -6,6 +6,7 @@ import {
   runSlashCommand,
 } from '../../src/cli/chat/commands.js';
 import { failureKey, MAX_SAME_CHECK_FAILURES } from '../../src/core/loop.js';
+import { announcesMoreWork } from '../../src/core/session.js';
 import { createEngine, type EngineOptions } from '../../src/engine.js';
 import { ScriptedModelClient, type ScriptedResponse } from '../../src/providers/scripted.js';
 import { BUILT_IN_SKILLS } from '../../src/skills/built-in.js';
@@ -68,6 +69,109 @@ describe('a check that keeps failing the same way', () => {
       failureKey('Duration 2.5s (transform 98ms)'),
     );
     expect(failureKey('3 failed')).not.toBe(failureKey('2 failed'));
+  });
+});
+
+describe('a check that passes with a note', () => {
+  it('tells the agent once, so its answer says what was checked, and is not run again', async () => {
+    const calls: string[][] = [];
+    const { engine, model } = await engineWith(
+      [
+        { toolCalls: [{ name: 'write_file', args: { path: 'page.css', content: 'a{}' } }] },
+        { text: 'Done. Please check the page in a browser.' },
+        { text: 'Done. The tester used the page in a browser: it works.' },
+      ],
+      {
+        verifyChanges: false,
+        permissions: { mode: 'accept-edits' },
+        hooks: {
+          beforeStop: ({ editedFiles }) => {
+            calls.push(editedFiles);
+            return { note: 'The tester used the page: Verdict: works' };
+          },
+        },
+      },
+    );
+
+    const events = await collect(engine.session().send('Style the page'));
+    await engine.dispose();
+
+    expect(calls).toEqual([['page.css']]);
+    expect(JSON.stringify(model.requests[2]?.messages.at(-1))).toContain(
+      'The checks before finishing passed and reported:\\n\\nThe tester used the page: Verdict: works',
+    );
+    expect(events.find((event) => event.type === 'hook')).toMatchObject({
+      hook: 'beforeStop',
+      passed: true,
+    });
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', stopReason: 'end_turn', turns: 3 });
+  });
+
+  it('runs again when files changed after the note', async () => {
+    let calls = 0;
+    const write = (content: string): ScriptedResponse => ({
+      toolCalls: [{ name: 'write_file', args: { path: 'page.css', content } }],
+    });
+    const { engine } = await engineWith(
+      [write('a{}'), { text: 'Done.' }, write('b{}'), { text: 'Done again.' }, { text: 'Final.' }],
+      {
+        verifyChanges: false,
+        permissions: { mode: 'accept-edits' },
+        hooks: {
+          beforeStop: () => (calls++ === 0 ? { note: 'Looked fine.' } : undefined),
+        },
+      },
+    );
+
+    await collect(engine.session().send('Style the page'));
+    await engine.dispose();
+
+    expect(calls).toBe(2);
+  });
+});
+
+describe('a final message that announces more work', () => {
+  it('is told apart from one that reports or hands over', () => {
+    // From a local model's eval runs: the run ended on these.
+    expect(
+      announcesMoreWork(
+        'Great! All tests are passing. Let me also run a quick check to see if our changes are consistent with the requirements:',
+      ),
+    ).toBe(true);
+    expect(announcesMoreWork('Now let me check the implementation in the amount.js file:')).toBe(
+      true,
+    );
+    expect(announcesMoreWork("Done with the parser.\n\nNext, I'll run the full test suite.")).toBe(
+      true,
+    );
+    for (const done of [
+      'Fixed the bug in src/cart.js; all tests pass.',
+      'Let me know if you want the export as CSV too.',
+      "I'll leave the deployment to you.",
+      'Should I also update the README?',
+      'I will start the build once you approve the plan.',
+      'Let me check the logs:\n\nThe error came from a missing env variable; I added it to .env.example.',
+    ]) {
+      expect(announcesMoreWork(done), done).toBe(false);
+    }
+  });
+
+  it('sends the agent back once to do it or to answer', async () => {
+    const { engine, model } = await engineWith([
+      { text: 'All tests pass. Let me also run the linter:' },
+      { text: 'Let me run the linter now:' },
+      { text: 'never reached' },
+    ]);
+
+    const events = await collect(engine.session().send('Fix it'));
+    await engine.dispose();
+
+    expect(JSON.stringify(model.requests[1]?.messages.at(-1))).toContain(
+      'Your last message says you will go on (\\"All tests pass. Let me also run the linter:\\")',
+    );
+    // Once per run: the second time, the run ends.
+    expect(model.requests).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', stopReason: 'end_turn' });
   });
 });
 
@@ -173,7 +277,7 @@ describe('the agent deciding to plan', () => {
     expect((await workspace.readFile('src/main.ts')).toString()).toBe('step 1');
   });
 
-  it('stays in plan mode when nobody can approve the plan', async () => {
+  it('does not start plan mode when nobody can approve the plan', async () => {
     const { engine } = await engineWith([...plan, { text: 'The plan is in PLAN.md.' }], {
       toolsets: ['fs', 'plan'],
       interactive: false,
@@ -183,7 +287,8 @@ describe('the agent deciding to plan', () => {
     await collect(session.send('Build a reconciliation service'));
     await engine.dispose();
 
-    expect(session.inPlanMode).toBe(true);
+    // A plan nobody can approve would end the run with nothing built (an eval trial did).
+    expect(session.inPlanMode).toBe(false);
   });
 
   it('comes with a built-in skill, and the base prompt asks for small verified steps', async () => {

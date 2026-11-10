@@ -184,6 +184,7 @@ const configSchema = z
     sessions: z.object({ save: z.boolean().optional() }).strict().optional(),
     // Checked in detail when servers load, with messages that name the server.
     mcpServers: z.record(z.string(), z.unknown()).optional(),
+    mcpTools: z.enum(['auto', 'on-demand', 'all']).optional(),
     http: z
       .object({
         apis: z

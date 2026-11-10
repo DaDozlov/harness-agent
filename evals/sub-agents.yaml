@@ -10,7 +10,7 @@ prompt: >-
   whole suite passes.
 limits:
   maxTurns: 30
-  maxCostUsd: 1.5
+  maxCostUsd: 3
 checks:
   - command: npm test
   - command: node --test acceptance/slug.test.js acceptance/money.test.js acceptance/days.test.js

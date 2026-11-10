@@ -37,6 +37,7 @@ export interface RewindReport {
 export class FileChanges {
   readonly #workspace: Workspace;
   readonly #runs: Run[] = [];
+  #writes = 0;
 
   constructor(workspace: Workspace) {
     this.#workspace = workspace;
@@ -58,8 +59,14 @@ export class FileChanges {
     else run.originals.set(path, await this.#workspace.readFile(path));
   }
 
+  /** Successful writes so far: whether anything changed since a moment, e.g. a passed check. */
+  get writes(): number {
+    return this.#writes;
+  }
+
   /** After a tool wrote `path` successfully. */
   after(path: string): void {
+    this.#writes++;
     const run = this.#runs.at(-1);
     run?.edited.add(path);
     run?.unchecked.add(path);

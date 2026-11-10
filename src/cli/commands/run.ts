@@ -188,9 +188,8 @@ function describeEvent(
       return `[agent] ${event.name} ${how} · ${turns}${cost}${event.summary ? ` · ${event.summary}` : ''}`;
     }
     case 'hook':
-      return event.hook === 'userPrompt'
-        ? `Blocked by a userPrompt hook: ${event.message}`
-        : `[hook] ${event.hook}: ${event.message.split('\n')[0]}`;
+      if (event.hook === 'userPrompt') return `Blocked by a userPrompt hook: ${event.message}`;
+      return `${event.passed ? '[check passed]' : `[hook] ${event.hook}:`} ${event.message.split('\n')[0]}`;
     case 'tool.end': {
       const label = toolLabels.get(`${event.agentId}:${event.callId}`) ?? event.tool;
       if (event.status === 'ok') return `[tool] ${label}`;

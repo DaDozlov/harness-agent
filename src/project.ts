@@ -176,6 +176,7 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
           return readMcp(again.config.mcpServers);
         },
         credentialsDir: join(home, MCP_CREDENTIALS_DIR),
+        ...(config.mcpTools && { tools: config.mcpTools }),
       },
     }),
   };

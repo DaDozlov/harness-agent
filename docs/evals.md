@@ -48,7 +48,7 @@ checks:
 | `answerContains: <text>` | The final answer contains the text |
 | `judge: <criterion>` | A model reading the task, the answer and the agent's `git diff` agrees |
 | `maxTurns: <n>` | The run took at most `n` model turns |
-| `called: <tool>` (`atLeast: <n>`) | The tool was called at least `n` times (default 1), sub-agents included, e.g. `delegate`, or a browser's screenshot tool |
+| `called: <tool>` (`atLeast: <n>`) | The tool ran successfully at least `n` times (default 1), sub-agents included; refused calls do not count, e.g. `delegate`, or a browser's screenshot tool |
 | `compactions: <n>` | The history was compacted at least `n` times, so the case really tests work across a compaction |
 
 Each trial runs in a fresh temp folder with the project's config, but without MCP servers, saved sessions or the tools that look at the project itself, and with the fixture's own AGENTS.md.

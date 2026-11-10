@@ -197,7 +197,9 @@ async function runSubagent(run: {
     // Nesting stops at the depth limit.
     .filter((tool) => tool.name !== 'delegate' || parent.depth + 1 < maxDepth)
     // Plan mode belongs to the user's agent.
-    .filter((tool) => tool.name !== 'start_plan' && tool.name !== 'finish_plan');
+    .filter((tool) => tool.name !== 'start_plan' && tool.name !== 'finish_plan')
+    // It loads into the caller's conversation: a sub-agent has the MCP tools its caller loaded.
+    .filter((tool) => tool.name !== 'load_tools');
   const canRun = tools.some((tool) => tool.name === 'run_command');
 
   const start = await parent.hooks.subagentStart(

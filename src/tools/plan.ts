@@ -29,6 +29,19 @@ export const startPlan = defineTool({
   async run(_args, { agent, workspace }) {
     if (!agent?.plan) return { output: 'Only the main agent can plan.', isError: true };
     if (agent.plan.active()) return 'Plan mode is already on.';
+    // Without a user, a plan could only end at finish_plan's denied approval, with nothing built.
+    const approvable =
+      agent.interactive ||
+      agent.permissions.check({ name: 'finish_plan', kind: 'read', alwaysAsk: true }, undefined)
+        .decision === 'allow';
+    if (!approvable) {
+      return {
+        output:
+          'Nobody can approve a plan in this run: it runs without a user. Build the task directly ' +
+          '(todo_write keeps track of the steps), and say in your answer how you went about it.',
+        isError: true,
+      };
+    }
     agent.plan.enter();
     const archived = await archivePlan(workspace);
     return (

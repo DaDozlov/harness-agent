@@ -14,7 +14,7 @@ test('parseMoney', () => {
   assert.equal(parseMoney('€12.50'), 1250);
   assert.equal(parseMoney('1.234,56'), 123456);
   assert.equal(parseMoney('-4.20'), -420);
-  assert.throws(() => parseMoney('1.234'), RangeError);
+  assert.throws(() => parseMoney('12.3456'), RangeError);
 });
 
 test('businessDaysBetween', () => {

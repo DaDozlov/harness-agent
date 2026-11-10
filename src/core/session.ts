@@ -17,7 +17,7 @@ import {
   type RunResult,
   runLoop,
 } from './loop.js';
-import { type Message, withoutImages } from './messages.js';
+import { type Message, textOf, withoutImages } from './messages.js';
 import type { ModelClient, ToolSpec } from './model.js';
 import { type PermissionMode, PermissionPolicy, type PermissionRules } from './permissions.js';
 import { completedTodos, droppedSteps, PLAN_FILE, readPlanSteps } from './plan.js';
@@ -55,6 +55,33 @@ const NOTHING_TO_CHECK = new RegExp(
   ].join('|'),
   'i',
 );
+
+/** "Let me also run…", "Now I'll check X:": a sentence that starts work rather than reports it. */
+const STARTS_WORK =
+  /^(?:(?:now|next|then|first|ok|okay|great)[,!]?\s+)*(?:let me|i(?:'|’)ll|i will|i(?:'|’)m going to|i am going to)\s+(?:(?:now|also|quickly|first|next|then|just)\s+)*(?:run|check|verify|look|read|open|fix|update|add|write|test|try|start|create|implement|search|inspect|review|examine|continue|proceed|do|make|build|install|edit|change|investigate|find)\b/i;
+/** Endings that hand over to the user: a question, or waiting for an answer or a go. */
+const HANDS_OVER =
+  /\?\s*$|\blet me know\b|\b(?:once|if|when) you\b|\byour (?:approval|go|answer|confirmation)\b/i;
+
+/**
+ * Whether a final message announces more work instead of reporting it: models sometimes end a
+ * turn with "Let me also run a quick check:" and no tool call, which would end the run there.
+ */
+export function announcesMoreWork(text: string): boolean {
+  const last =
+    text
+      .trim()
+      .split(/\n\s*\n/)
+      .at(-1)
+      ?.trim() ?? '';
+  if (!last || HANDS_OVER.test(last)) return false;
+  const sentence =
+    last
+      .split(/(?<=[.!])\s+/)
+      .at(-1)
+      ?.trim() ?? '';
+  return STARTS_WORK.test(sentence);
+}
 
 const SKIPPED_EVENTS = new Set<EngineEvent['type']>([
   'text.delta',
@@ -195,6 +222,8 @@ export class Session {
   #planSaved: { mode: PermissionMode; effort: 'low' | 'medium' | 'high' | undefined } | undefined;
   /** The current run was reminded already: once per run is enough. */
   #reminded = false;
+  /** This run's last message announced work it did not start, and the agent was told. */
+  #toldUnfinished = false;
   /** Building an approved plan: a run that stops with steps open is sent back (#planReminder). */
   #building = false;
   /** The plan was approved during the current run, or before it (`/plan go`). */
@@ -467,6 +496,7 @@ export class Session {
       const started = Date.now();
       this.#ranCommands = false;
       this.#reminded = false;
+      this.#toldUnfinished = false;
       this.#nudgedAt = undefined;
       this.#tools.loops?.reset();
       if (first) await this.#tellOpenPlan();
@@ -499,7 +529,8 @@ export class Session {
         intent: this.#intent,
         beforeEnd: () => this.#commitLinks(base, started),
         hookEvents: () => this.#takeHookEvents(),
-        stopCheck: async () => this.#verifyReminder() ?? (await this.#planReminder()),
+        stopCheck: async () =>
+          this.#unfinishedReminder() ?? this.#verifyReminder() ?? (await this.#planReminder()),
         reasoningEffort: () => this.#reasoningEffort,
         // One per agent kind in this session: parallel sub-agents of a kind share a prompt start.
         cacheKey: `${this.id}:${this.agentId.replace(/-\d+$/, '')}`,
@@ -751,6 +782,20 @@ export class Session {
       this.#ranCommands = true;
       if (event.status === 'ok' || event.status === 'error') this.#changes.ranCommand();
     }
+  }
+
+  /** Once per run: the final message says "Let me also…" but made no call. */
+  #unfinishedReminder(): string | undefined {
+    if (this.#toldUnfinished) return undefined;
+    const last = this.messages.at(-1);
+    const text = last?.role === 'assistant' ? textOf(last).trim() : '';
+    if (!announcesMoreWork(text)) return undefined;
+    this.#toldUnfinished = true;
+    const quote = text.split('\n').at(-1)!.trim().slice(0, 160);
+    return (
+      `Your last message says you will go on ("${quote}"), but it made no tool call, so the run ` +
+      'would end here. Do it now, or, if you are done, give your final answer.'
+    );
   }
 
   #verifyReminder(): string | undefined {

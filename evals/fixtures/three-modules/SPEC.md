@@ -20,7 +20,7 @@ An amount of money as written by people, as whole cents (an integer).
 - Thousands separators are allowed: `"1,234.56"` gives `123456`.
 - German style is allowed too: `"1.234,56"` gives `123456`, and `"12,5"` gives `1250`.
 - A leading minus makes it negative: `"-4.20"` gives `-420`.
-- More than two decimals, or no digits at all, throws a `RangeError`.
+- More than two decimals (`"12.3456"`), or no digits at all, throws a `RangeError`.
 
 ## `businessDaysBetween(from, to)` in `src/days.js`
 

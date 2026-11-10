@@ -23,6 +23,7 @@ export default defineConfig({ /* settings below */ });
 | `toolsets` | `fs`, `shell`, `web`, `todo`, `plan`, `http`, `mcp`, `agents`, `skills`, `memory` | all |
 | `tools` | Your tools, made with `defineTool` | — |
 | `mcpServers` | Same shape as `.mcp.json`; secrets with `env('NAME')` | — |
+| `mcpTools` | `on-demand`: MCP tools are listed by name and the agent loads the ones it needs (`load_tools`), so their schemas are not sent with every call; `all`; `auto` | `auto`: on demand above 20 tools |
 | `http.apis` | APIs for `http_request` by base URL: `{ headers, description }` | — |
 | `subagents` | `maxDepth`, `maxParallel`, `limits`, `model` (for sub-agents whose agent file names none, e.g. a cheaper one), `minBudget` (the least share of the run's budget a sub-agent starts with) | `1`, `4`, 50 turns, the caller's model, $0.50 / 30,000 tokens |
 | `workspace` | `type: 'local' \| 'docker'`, `shell`; Docker options below | local |
@@ -68,7 +69,7 @@ A command line is checked command by command (`npm run build && npm test`, `a; b
 | `beforeModelCall` / `afterModelCall` | Change the request / log the answer |
 | `beforeToolCall` | Block, change arguments, or allow without asking |
 | `afterToolCall` | Add feedback to the result (e.g. lint errors) |
-| `beforeStop` | Send the agent back with feedback; gets `editedFiles` |
+| `beforeStop` | Send the agent back with feedback (`{ continue: true, feedback }`), or pass with a `note` the agent puts in its answer; gets `editedFiles` |
 | `beforeCompact` | Keep text through compaction |
 | `subagentStart` / `subagentEnd` | Change or block a sub-agent's task / report |
 | `sessionEnd` | Clean up, export |

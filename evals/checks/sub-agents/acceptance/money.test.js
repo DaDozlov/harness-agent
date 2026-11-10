@@ -10,6 +10,6 @@ test('parseMoney follows SPEC.md', () => {
   assert.equal(parseMoney('1.234,56'), 123456);
   assert.equal(parseMoney('12,5'), 1250);
   assert.equal(parseMoney('-4.20'), -420);
-  assert.throws(() => parseMoney('1.234'), RangeError);
+  assert.throws(() => parseMoney('12.3456'), RangeError);
   assert.throws(() => parseMoney('EUR'), RangeError);
 });

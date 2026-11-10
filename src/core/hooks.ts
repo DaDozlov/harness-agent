@@ -71,7 +71,16 @@ export interface Hooks {
       /** Files the file tools changed in this run (commands' changes are not seen). */
       editedFiles: string[];
     },
-  ) => Result<{ continue?: boolean; feedback?: string }>;
+  ) => Result<{
+    continue?: boolean;
+    feedback?: string;
+    /**
+     * The check passed, and the agent should know what it found before it finishes, e.g. "the
+     * tester used the page: works". It gets the note once and gives its final answer again;
+     * the checks do not run again unless files changed since.
+     */
+    note?: string;
+  }>;
   /** Before older turns are summarized (`messages`: the whole history): text to keep word for word. */
   beforeCompact?: (
     context: HookContext & { messages: readonly Message[] },
@@ -226,6 +235,7 @@ export class HookRunner {
   ) {
     const failures: HookFailure[] = [];
     const parts: string[] = [];
+    const notes: string[] = [];
     for (const hook of this.#all('beforeStop')) {
       const result = await attempt(
         'beforeStop',
@@ -233,8 +243,9 @@ export class HookRunner {
         failures,
       );
       if (result?.continue) parts.push(result.feedback || DEFAULT_STOP_FEEDBACK);
+      else if (result?.note) notes.push(result.note);
     }
-    return { feedback: joined(parts), failures };
+    return { feedback: joined(parts), note: joined(notes), failures };
   }
 
   async beforeCompact(context: HookContext, messages: readonly Message[]) {

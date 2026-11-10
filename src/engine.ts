@@ -29,6 +29,7 @@ import type { Workspace } from './core/workspace.js';
 import { mcpReloadTool, mcpSearchTool } from './mcp/agent-tools.js';
 import { type McpServerEntry, mcpServerUrl } from './mcp/config.js';
 import { formatMcpInstructions, McpManager, type McpServerStatus } from './mcp/manager.js';
+import { isOnDemand, loadedIn, loadToolsTool, onDemandSection } from './mcp/on-demand.js';
 import {
   loginProblem,
   loginToMcpServer,
@@ -196,6 +197,8 @@ export interface EngineOptions {
     reload?: () => Promise<McpServerEntry[]>;
     /** Where OAuth logins are kept, e.g. `~/.heaw/credentials/mcp`. Without it, no logins. */
     credentialsDir?: string;
+    /** How their tools reach the model (config `mcpTools`). Default: `auto`. */
+    tools?: 'auto' | 'on-demand' | 'all';
   };
   /** APIs for `http_request`, by base URL. The tool exists only when there are some. */
   http?: { apis?: Record<string, HttpApi> };
@@ -327,6 +330,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       }),
     });
   const mcp = manageMcp ? newMcpManager() : undefined;
+  const mcpToolsMode = options.mcp?.tools ?? 'auto';
   // MCP servers of agent files, by agent: started when the agent first runs, so their tools (a
   // browser's two dozen) cost the other agents nothing, and kept for its next run.
   const agentServers = new Map<string, McpManager>();
@@ -505,14 +509,35 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       ...(definition?.mode && { mode: definition.mode }),
       ...(own && { own: ownedBy(own) }),
     };
-    const listed = wanted
+    const fromConfig = wanted
       ? () => currentTools().filter((tool) => wanted.includes(tool.name))
       : currentTools;
+    // MCP tools on demand: the project's servers' tools this conversation has not loaded are
+    // listed in the prompt instead of sent. An agent file that names its tools gets just those.
+    const loaded = new Set(restored ? loadedIn(restored.history) : []);
+    const onDemandTools = () => {
+      const all = mcp?.tools() ?? [];
+      return !wanted && isOnDemand(mcpToolsMode, all.length) ? all : [];
+    };
+    const loadTools = loadToolsTool(() => mcp?.tools() ?? [], loaded);
+    const listed = () => {
+      const offered = new Set(onDemandTools().map((tool) => tool.name));
+      if (!offered.size) return fromConfig();
+      const kept = fromConfig().filter((tool) => !offered.has(tool.name) || loaded.has(tool.name));
+      return [...kept, loadTools];
+    };
     return new Session({
       model: setup.model ?? model,
       // Read before each turn: MCP servers can connect or reload while a session goes on.
       system: () =>
-        [...header, memorySection(canRemember(wanted)), mcpSection(own), environment, skillsIndex]
+        [
+          ...header,
+          memorySection(canRemember(wanted)),
+          mcpSection(own),
+          onDemandSection(onDemandTools()),
+          environment,
+          skillsIndex,
+        ]
           .filter(Boolean)
           .join('\n\n'),
       workspace,

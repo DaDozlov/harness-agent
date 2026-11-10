@@ -83,6 +83,6 @@ gpt-5.4 does every case; the local model, at about a minute per turn on a deskto
 
 What the suite found on its first runs:
 
-- **In heaw:** a conversation that went on with a plan approved in an earlier one did a step and stopped, since only the approving conversation sent the agent on to the next step (`continue-plan`, 1/3, now 3/3). A response the local model server cut off ended the run instead of being asked again.
-- **In the cases:** two judge criteria failed correct answers, such as "the tests passed, the schema check could not run". A criterion now gives the facts and says what fails.
-- **In the runner:** a failed hidden test showed the end of a stack trace instead of the test and its assertion.
+- **In heaw:** a conversation that went on with a plan approved in an earlier one did a step and stopped, since only the approving conversation sent the agent on to the next step (`continue-plan`, 1/3, now 3/3). A response the local model server cut off ended the run instead of being asked again. In `sub-agents`, the agent started plan mode in a run nobody could approve a plan in, and ended with only PLAN.md; `start_plan` now says to build directly there.
+- **In the cases:** two judge criteria failed correct answers, such as "the tests passed, the schema check could not run". A criterion now gives the facts and says what fails. `sub-agents` had a cost limit too low for three sub-agents (heaw refused to start them) and expected `parseMoney('1.234')` to throw for too many decimals, though German grouping reads it as 1234 (now `'12.3456'`).
+- **In the runner:** a failed hidden test showed the end of a stack trace instead of the test and its assertion. `called` counted refused calls, so three sub-agents that never started passed it; it counts calls that ran now.

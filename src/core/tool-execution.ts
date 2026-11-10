@@ -181,7 +181,12 @@ async function* authorize(
   const tool = tools.get(call.name);
   if (!tool) {
     const available = [...tools.keys()].join(', ') || 'none';
-    return { finished: error(`Unknown tool "${call.name}". Available tools: ${available}.`) };
+    const hint = tools.has('load_tools')
+      ? ' A tool listed under "MCP tools on demand" has to be loaded with load_tools first.'
+      : '';
+    return {
+      finished: error(`Unknown tool "${call.name}". Available tools: ${available}.${hint}`),
+    };
   }
 
   const parsed = tool.parse(call.args);

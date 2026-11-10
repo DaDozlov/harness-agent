@@ -80,6 +80,12 @@ export interface HeawConfig {
   };
   /** MCP servers, in the same shape as `.mcp.json`; secrets with `env('NAME')`. */
   mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * How MCP tools reach the model. `on-demand`: their names are listed and the agent loads the
+   * ones it needs (`load_tools`), so their schemas are not sent with every call. `auto` (the
+   * default): all of them while the servers bring at most 20 tools, on demand above that.
+   */
+  mcpTools?: 'auto' | 'on-demand' | 'all';
   http?: {
     /**
      * APIs the agent may call with `http_request`, by base URL, e.g.

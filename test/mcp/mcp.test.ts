@@ -618,3 +618,85 @@ describe('images from tools', () => {
     expect(toolResults(model.requests[1])[0]?.images).toBeUndefined();
   });
 });
+
+describe('MCP tools on demand', () => {
+  const names = (request: ModelRequest | undefined) =>
+    request?.tools?.map((tool) => tool.name) ?? [];
+  const lastOutput = (request: ModelRequest | undefined) =>
+    request?.messages.at(-1)?.content[0] as { output?: string; isError?: boolean } | undefined;
+
+  it('lists the tools, and sends a schema only once the agent has loaded the tool', async () => {
+    const model = new ScriptedModelClient([
+      { toolCalls: [{ name: 'mcp__test__add', args: { a: 1, b: 2 } }] },
+      { toolCalls: [{ name: 'load_tools', args: { names: ['mcp__test__add', 'mcp__nope'] } }] },
+      { toolCalls: [{ name: 'mcp__test__add', args: { a: 1, b: 2 } }] },
+      { text: '3' },
+    ]);
+    const engine = await createEngine({
+      model,
+      toolsets: [],
+      interactive: false,
+      git: false,
+      permissions: { allow: ['mcp__test__*'] },
+      mcp: { servers: [entry('test', stdioServer())], tools: 'on-demand' },
+    });
+
+    await collect(engine.session().send('Add 1 and 2'));
+    await engine.dispose();
+
+    expect(names(model.requests[0])).toEqual(['load_tools']);
+    expect(model.requests[0]?.system).toContain('## MCP tools on demand');
+    expect(model.requests[0]?.system).toContain('- mcp__test__echo: Repeat the given text.');
+    expect(lastOutput(model.requests[1])).toMatchObject({
+      isError: true,
+      output: expect.stringContaining('has to be loaded with load_tools first') as unknown,
+    });
+    expect(lastOutput(model.requests[2])?.output).toBe(
+      'Loaded: mcp__test__add. Call them from your next step.\nNot found: mcp__nope.',
+    );
+    expect(names(model.requests[2])).toEqual(['mcp__test__add', 'load_tools']);
+    expect(lastOutput(model.requests[3])?.output).toBe('3');
+    // The list stays as it was, so the cached start of the prompt stays valid.
+    expect(model.requests[3]?.system).toBe(model.requests[0]?.system);
+  });
+
+  it('sends every tool while there are few, and keeps what a resumed conversation loaded', async () => {
+    const few = new ScriptedModelClient([{ text: 'ok' }]);
+    const allSent = await createEngine({
+      model: few,
+      toolsets: [],
+      interactive: false,
+      git: false,
+      mcp: { servers: [entry('test', stdioServer())] },
+    });
+    await collect(allSent.session().send('Hi'));
+    await allSent.dispose();
+    expect(names(few.requests[0])).toContain('mcp__test__echo');
+    expect(names(few.requests[0])).not.toContain('load_tools');
+
+    const store = new JsonlSessionStore(await tempDir());
+    const options = {
+      toolsets: [],
+      interactive: false,
+      git: false,
+      sessionStore: store,
+      mcp: { servers: [entry('test', stdioServer())], tools: 'on-demand' as const },
+    };
+    const first = await createEngine({
+      ...options,
+      model: new ScriptedModelClient([
+        { toolCalls: [{ name: 'load_tools', args: { names: ['mcp__test__echo'] } }] },
+        { text: 'Loaded.' },
+      ]),
+    });
+    const session = first.session();
+    await collect(session.send('Load echo'));
+    await first.dispose();
+
+    const later = new ScriptedModelClient([{ text: 'Still here.' }]);
+    const second = await createEngine({ ...options, model: later });
+    await collect((await second.resume(session.id)).send('Go on'));
+    await second.dispose();
+    expect(names(later.requests[0])).toEqual(['mcp__test__echo', 'load_tools']);
+  });
+});

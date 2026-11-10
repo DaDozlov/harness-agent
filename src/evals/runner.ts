@@ -192,7 +192,10 @@ async function runTrial(
     const events = records.flatMap((record) => (record.type === 'event' ? [record.event] : []));
     const calls = new Map<string, number>();
     for (const event of events) {
-      if (event.type === 'tool.start') calls.set(event.tool, (calls.get(event.tool) ?? 0) + 1);
+      // Calls that ran: a refused or failed call (a sub-agent not started) does not count.
+      if (event.type === 'tool.end' && event.status === 'ok') {
+        calls.set(event.tool, (calls.get(event.tool) ?? 0) + 1);
+      }
     }
     const compactions = events.filter((event) => event.type === 'compaction').length;
 

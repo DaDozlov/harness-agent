@@ -139,6 +139,26 @@ describe('building an approved plan', () => {
     expect(session.buildingPlan).toBe(true);
   });
 
+  it('builds directly in a run without a user, unless a rule approves the plan', async () => {
+    const { engine, model } = await engineWith(
+      [call('start_plan', { reason: 'Big task.' }), { text: 'Built it directly.' }],
+      { interactive: false },
+    );
+    await run(engine.session(), 'Build the comparator');
+    await engine.dispose();
+    expect(JSON.stringify(model.requests[1]?.messages.at(-1))).toContain(
+      'Nobody can approve a plan in this run',
+    );
+
+    const allowed = await engineWith(
+      [call('start_plan', { reason: 'Big task.' }), { text: 'Planning.' }],
+      { interactive: false, permissions: { mode: 'accept-edits', preapproved: ['finish_plan'] } },
+    );
+    await run(allowed.engine.session(), 'Build the comparator');
+    await allowed.engine.dispose();
+    expect(JSON.stringify(allowed.model.requests[1]?.messages.at(-1))).toContain('Plan mode is on');
+  });
+
   it('does not ask the user to approve a plan that was never written', async () => {
     const { engine, model } = await engineWith([
       call('start_plan', { reason: 'Big task.' }),
