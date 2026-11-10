@@ -3,7 +3,8 @@ import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { evalCommand } from '../../src/cli/commands/eval.js';
 import { modelsCommand } from '../../src/cli/commands/models.js';
-import { createEngine } from '../../src/engine.js';
+import type { ModelClient } from '../../src/core/model.js';
+import { createEngine, type EngineOptions } from '../../src/engine.js';
 import { loadEvalCases, parseEvalCase } from '../../src/evals/cases.js';
 import { formatEvalReport, parseVerdict, runEvals } from '../../src/evals/runner.js';
 import { ScriptedModelClient, type ScriptedResponse } from '../../src/providers/scripted.js';
@@ -74,6 +75,8 @@ describe('eval cases', () => {
       prompt: 'Fix add.',
       trials: 2,
       allow: ['run_command(node *)'],
+      deny: [],
+      agents: false,
       limits: {},
       checks: [
         { command: 'node check.js', expectExitCode: 0 },
@@ -328,6 +331,91 @@ describe('running evals', () => {
     expect(await readFile(join(root, 'evals', 'fixtures', 'math', 'math.js'), 'utf8')).toContain(
       'a - b',
     );
+  });
+
+  it('gives a trial the case’s deny rules, the fixture’s agents and a smaller context window', async () => {
+    const root = await evalProject(
+      [
+        'prompt: The add function is wrong. Fix it.',
+        'fixture: ./fixtures/math',
+        "deny: ['run_command(rm *)']",
+        'agents: true',
+        'contextWindow: 16000',
+        'checks:',
+        '  - file: math.js',
+        '    contains: a + b',
+      ].join('\n'),
+    );
+    await mkdir(join(root, 'evals', 'fixtures', 'math', '.heaw', 'agents'), { recursive: true });
+    await writeFile(
+      join(root, 'evals', 'fixtures', 'math', '.heaw', 'agents', 'helper.md'),
+      '---\nname: helper\ndescription: Helps.\n---\nHelp.',
+    );
+    const seen: EngineOptions[] = [];
+
+    await evalCommand(
+      undefined,
+      {},
+      {
+        cwd: root,
+        env: { HEAW_HOME: join(root, 'home') },
+        stdout: output(),
+        stderr: output(),
+        packageEntry: resolve('src/index.ts'),
+        createEngine: (options) => {
+          seen.push(options);
+          return createEngine({
+            ...options,
+            verifyChanges: false,
+            model: new ScriptedModelClient(seen.length === 1 ? [] : FIX, { id: 'scripted:test' }),
+          });
+        },
+      },
+    );
+
+    const trial = seen.at(-1)!;
+    expect(trial.permissions?.deny).toContain('run_command(rm *)');
+    expect(trial.agents?.map((agent) => agent.name)).toContain('helper');
+    expect((trial.model as ModelClient).capabilities.contextWindow).toBe(16_000);
+    expect((trial.model as ModelClient).capabilities.maxOutputTokens).toBeLessThanOrEqual(4_000);
+  });
+
+  it('grades the tools a trial called and whether its history was compacted', async () => {
+    const root = await evalProject('');
+    const evalCase = parseEvalCase(
+      [
+        'prompt: The add function is wrong. Fix it.',
+        'fixture: ./fixtures/math',
+        'checks:',
+        '  - called: write_file',
+        '  - called: delegate',
+        '    atLeast: 3',
+        '  - compactions: 1',
+      ].join('\n'),
+      join(root, 'evals', 'fix-add.yaml'),
+    );
+
+    const report = await runEvals([evalCase], {
+      model: 'scripted:test',
+      judge: new ScriptedModelClient([]),
+      createWorkspace: (dir) => new LocalWorkspace(dir),
+      createEngine: (workspace) =>
+        createEngine({
+          model: new ScriptedModelClient(FIX),
+          workspace,
+          toolsets: ['fs'],
+          interactive: false,
+          permissions: { mode: 'accept-edits' },
+          git: false,
+          verifyChanges: false,
+        }),
+    });
+
+    expect(report.cases[0]?.trials[0]?.checks).toEqual([
+      { check: 'write_file called at least 1 time', passed: true },
+      { check: 'delegate called at least 3 times', passed: false, detail: 'called 0 times' },
+      { check: 'compacted at least 1 time', passed: false, detail: 'compacted 0 times' },
+    ]);
   });
 
   it('heaw models shows what heaw knows about the model', async () => {

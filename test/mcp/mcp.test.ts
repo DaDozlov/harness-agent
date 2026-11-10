@@ -3,6 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type AgentDefinition, parseAgentDefinition } from '../../src/agents/definitions.js';
+import type { ModelRequest } from '../../src/core/model.js';
 import type { Tool } from '../../src/core/tools.js';
 import { createEngine } from '../../src/engine.js';
 import {
@@ -18,6 +19,7 @@ import { McpManager } from '../../src/mcp/manager.js';
 import { mcpToolName } from '../../src/mcp/tools.js';
 import { env } from '../../src/providers/settings.js';
 import { ScriptedModelClient } from '../../src/providers/scripted.js';
+import { JsonlSessionStore } from '../../src/sessions/jsonl-store.js';
 import { collect, tempDirFactory } from '../helpers.js';
 
 const tempDir = tempDirFactory();
@@ -550,5 +552,69 @@ describe("an agent's own MCP servers", () => {
       isError: true,
       output: expect.stringContaining('deny rule "mcp__browser__add"') as unknown,
     });
+  });
+});
+
+describe('images from tools', () => {
+  const pictures = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      toolCalls: [{ name: 'mcp__test__picture', args: {}, id: `p${index}` }],
+    }));
+  const toolResults = (request: ModelRequest | undefined) =>
+    (request?.messages ?? []).flatMap((message) =>
+      message.role === 'tool' ? message.content : [],
+    );
+
+  it('reach a model that can see, the latest three only, and are never saved', async () => {
+    const model = new ScriptedModelClient([...pictures(4), { text: 'Seen.' }], {
+      capabilities: { vision: true },
+    });
+    const root = await tempDir();
+    const store = new JsonlSessionStore(root);
+    const engine = await createEngine({
+      model,
+      toolsets: [],
+      interactive: false,
+      git: false,
+      permissions: { allow: ['mcp__test__*'] },
+      mcp: { servers: [entry('test', stdioServer())] },
+      sessionStore: store,
+    });
+
+    const session = engine.session();
+    await collect(session.send('Look at it'));
+    await engine.dispose();
+
+    const results = toolResults(model.requests[4]);
+    expect(results.map((part) => part.images?.length ?? 0)).toEqual([0, 1, 1, 1]);
+    expect(results[3]?.images?.[0]).toEqual({
+      mediaType: 'image/png',
+      data: Buffer.from('not really a png').toString('base64'),
+    });
+    // The description stays for the older ones, and for models that cannot see.
+    expect(results[0]?.output).toBe('[image, image/png, 16 bytes]\na picture');
+    const saved = JSON.stringify(await store.load(session.id));
+    expect(saved).toContain('[image, image/png, 16 bytes]');
+    expect(saved).not.toContain(Buffer.from('not really a png').toString('base64'));
+  });
+
+  it('reach a model that cannot see only as their description', async () => {
+    const model = new ScriptedModelClient([...pictures(1), { text: 'Read.' }]);
+    const engine = await createEngine({
+      model,
+      toolsets: [],
+      interactive: false,
+      git: false,
+      permissions: { allow: ['mcp__test__*'] },
+      mcp: { servers: [entry('test', stdioServer())] },
+    });
+
+    await collect(engine.session().send('Look at it'));
+    await engine.dispose();
+
+    expect(toolResults(model.requests[1])).toMatchObject([
+      { output: '[image, image/png, 16 bytes]\na picture' },
+    ]);
+    expect(toolResults(model.requests[1])[0]?.images).toBeUndefined();
   });
 });

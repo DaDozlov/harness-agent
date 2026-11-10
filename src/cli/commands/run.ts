@@ -185,7 +185,7 @@ function describeEvent(
       const turns = `${event.turns} turn${event.turns === 1 ? '' : 's'}`;
       const cost = event.costUsd === undefined ? '' : ` · ${formatCost(event.costUsd)}`;
       const how = event.stopReason === 'end_turn' ? 'finished' : `stopped (${event.stopReason})`;
-      return `[agent] ${event.name} ${how} · ${turns}${cost}`;
+      return `[agent] ${event.name} ${how} · ${turns}${cost}${event.summary ? ` · ${event.summary}` : ''}`;
     }
     case 'hook':
       return event.hook === 'userPrompt'

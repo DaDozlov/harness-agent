@@ -27,6 +27,8 @@ export interface HookAgentResult {
   text: string;
   stopReason: StopReason;
   costUsd?: number;
+  turns?: number;
+  usage?: Usage;
 }
 
 type Result<T> = T | undefined | void | Promise<T | undefined | void>;

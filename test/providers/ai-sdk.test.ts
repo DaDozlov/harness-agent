@@ -11,6 +11,7 @@ import type { ModelRequest, ModelStreamEvent } from '../../src/core/model.js';
 import {
   AiSdkModelClient,
   RepeatFilter,
+  takesImagesInToolResults,
   toCallOptions,
   toPrompt,
 } from '../../src/providers/ai-sdk.js';
@@ -275,6 +276,47 @@ describe('toPrompt', () => {
 
   it('leaves out an empty system prompt', () => {
     expect(toPrompt({ system: '', messages: [] })).toEqual([]);
+  });
+});
+
+describe('images in tool results', () => {
+  const request: ModelRequest = {
+    system: '',
+    messages: [
+      {
+        role: 'tool',
+        content: [
+          {
+            type: 'tool-result',
+            callId: 'c1',
+            name: 'mcp__browser__browser_take_screenshot',
+            output: '[image, image/png, 3 bytes]',
+            images: [{ mediaType: 'image/png', data: 'AAAA' }],
+          },
+        ],
+      },
+    ],
+  };
+  const outputOf = (prompt: ReturnType<typeof toPrompt>) =>
+    (prompt[0]?.content as Array<{ output: unknown }>)[0]?.output;
+
+  it('go as images to APIs that take them, and as their description elsewhere', () => {
+    expect(outputOf(toPrompt(request, { images: true }))).toEqual({
+      type: 'content',
+      value: [
+        { type: 'text', text: '[image, image/png, 3 bytes]' },
+        { type: 'file', mediaType: 'image/png', data: { type: 'data', data: 'AAAA' } },
+      ],
+    });
+    expect(outputOf(toPrompt(request))).toEqual({
+      type: 'text',
+      value: '[image, image/png, 3 bytes]',
+    });
+    expect(takesImagesInToolResults('azure.responses')).toBe(true);
+    expect(takesImagesInToolResults('openai.responses')).toBe(true);
+    expect(takesImagesInToolResults('anthropic.messages')).toBe(true);
+    expect(takesImagesInToolResults('openai.chat')).toBe(false);
+    expect(takesImagesInToolResults('ollama.chat')).toBe(false);
   });
 });
 

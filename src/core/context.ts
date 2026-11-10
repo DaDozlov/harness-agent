@@ -18,6 +18,9 @@ const KEEP_RECENT_SHARE_OF_HISTORY = 0.3;
 /** Summarizing less than this saves nothing. */
 const MIN_SUMMARIZED_TOKENS = 1_000;
 
+/** What an image costs, about: a 1280×720 screenshot is some 1,100 tokens with OpenAI. */
+const IMAGE_TOKENS = 1_500;
+
 /** About four characters per token; `ContextMeter` corrects this per provider. */
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -39,7 +42,9 @@ function estimateMessage(message: Message): number {
     if (part.type === 'text' || part.type === 'reasoning') chars += part.text.length;
     else if (part.type === 'tool-call')
       chars += part.name.length + JSON.stringify(part.args).length;
-    else if (part.type === 'tool-result') chars += part.output.length;
+    else if (part.type === 'tool-result') {
+      chars += part.output.length + (part.images?.length ?? 0) * IMAGE_TOKENS * 4;
+    }
   }
   // Roles and separators cost a few tokens per message.
   return Math.ceil(chars / 4) + 4;

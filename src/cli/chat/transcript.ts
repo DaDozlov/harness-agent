@@ -145,12 +145,19 @@ function applyEvent(state: TranscriptState, event: EngineEvent): TranscriptState
   switch (event.type) {
     case 'subagent.start':
       return startSubagent(state, event);
-    case 'subagent.end':
-      return withAgent(
+    case 'subagent.end': {
+      const ended = withAgent(
         closeAgentLine(state, event.childAgentId),
         event.childAgentId,
-        (ended) => ended && { ...ended, running: false },
+        (view) => view && { ...view, running: false },
       );
+      // An agent a hook ran (a tester, a reviewer) has no delegate call to report on: its last
+      // line, usually a verdict, is shown instead.
+      if (!event.summary) return ended;
+      const done = event.stopReason === 'end_turn';
+      const text = `${event.name}: ${event.summary}${done ? '' : ` (stopped: ${event.stopReason})`}`;
+      return push(ended, (id) => ({ kind: 'notice', id, text, tone: done ? 'info' : 'warning' }));
+    }
     case 'text.delta': {
       const last = state.items.at(-1);
       const open = last?.kind === 'assistant' && !last.done;

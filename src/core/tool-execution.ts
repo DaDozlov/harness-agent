@@ -3,7 +3,7 @@ import type { FileChanges } from './changes.js';
 import { isAbortError } from './errors.js';
 import type { ApprovalDecision, ApprovalRequest, EngineEvent, EngineEventBody } from './events.js';
 import { type HookContext, type HookFailure, hookFailureEvent, type HookRunner } from './hooks.js';
-import type { ToolCallPart, ToolResultPart } from './messages.js';
+import type { ToolCallPart, ToolImage, ToolResultPart } from './messages.js';
 import { type PermissionPolicy, type Subject, suggestRule } from './permissions.js';
 import { EventQueue } from './event-queue.js';
 import { type LoopDetector, type StuckSignal, stuckNote } from './stuck.js';
@@ -70,6 +70,8 @@ interface Approved {
 
 interface Finished {
   output: string;
+  /** For the model only; events and saved sessions keep the description in `output`. */
+  images?: ToolImage[] | undefined;
   status: ToolStatus;
   durationMs: number;
   /** `afterToolCall` hooks that threw. */
@@ -107,6 +109,7 @@ export async function* executeToolCalls(
       name: call.name,
       output,
       ...(result.status !== 'ok' && { isError: true }),
+      ...(result.images?.length && { images: result.images }),
     });
     yield stamp({
       type: 'tool.end',
@@ -324,7 +327,8 @@ async function run(
       state: runtime.state,
       agent,
     });
-    const { output, isError } = typeof raw === 'string' ? { output: raw, isError: false } : raw;
+    const { output, isError, images } =
+      typeof raw === 'string' ? { output: raw, isError: false, images: undefined } : raw;
     const status: ToolStatus = isError ? 'error' : 'ok';
     const wrote = path && !isError ? path : undefined;
     if (wrote) runtime.changes?.after(wrote);
@@ -333,7 +337,9 @@ async function run(
     const limited = (await limitOutput(output, item, runtime)) + (note ? `\n\n[${note}]` : '');
     const durationMs = Date.now() - started;
     const hooks = runtime.hooks;
-    if (!hooks?.runner.has('afterToolCall')) return { output: limited, status, durationMs, stuck };
+    if (!hooks?.runner.has('afterToolCall')) {
+      return { output: limited, images, status, durationMs, stuck };
+    }
     const after = await hooks.runner.afterToolCall(hooks.context(signal), {
       tool: item.tool.name,
       args: item.args,
@@ -342,6 +348,7 @@ async function run(
     });
     return {
       output: after.feedback ? `${limited}\n\n${after.feedback}` : limited,
+      images,
       status,
       durationMs,
       failures: after.failures,

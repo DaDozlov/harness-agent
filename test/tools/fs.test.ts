@@ -287,6 +287,29 @@ describe('glob', () => {
       'No files match *.py.',
     );
   });
+
+  it('finds hidden files when the pattern or path names them, and skips them otherwise', async () => {
+    const { context } = await setup({
+      '.heaw/agents/tester.md': 'tester',
+      '.github/workflows/ci.yml': 'name: ci',
+      'docs/a.md': '',
+    });
+    await context.workspace.exec('git init -q');
+
+    expect((await callTool(glob, { pattern: '*.md' }, context)).output).toBe('docs/a.md');
+    expect((await callTool(glob, { pattern: '.heaw/**' }, context)).output).toBe(
+      '.heaw/agents/tester.md',
+    );
+    expect((await callTool(glob, { pattern: '*.yml', path: '.github' }, context)).output).toBe(
+      '.github/workflows/ci.yml',
+    );
+    // `.git` stays out even then.
+    const all = (await callTool(glob, { pattern: '**/.*/**' }, context)).output;
+    expect(all).not.toContain('.git/');
+    expect((await callTool(grep, { pattern: 'tester', glob: '.heaw/**' }, context)).output).toBe(
+      '.heaw/agents/tester.md',
+    );
+  });
 });
 
 describe('grep', () => {

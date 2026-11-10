@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runSlashCommand, SETUP_PROMPT, type CommandContext } from '../src/cli/chat/commands.js';
@@ -78,6 +78,12 @@ describe('the setup-harness skill', () => {
 
   it('writes a tester that loads, with a browser of its own', async () => {
     expect(SETUP_HARNESS_SKILL.content).toContain(TESTER_AGENT.trimEnd());
+    // The ui-tester eval case tests this very file.
+    const evalCopy = await readFile(
+      resolve('evals/fixtures/contacts-ui/.heaw/agents/tester.md'),
+      'utf8',
+    );
+    expect(evalCopy).toBe(TESTER_AGENT.replace('<browser>', 'chrome'));
     const root = await project("export default { model: 'ollama:test' };", {
       '.heaw/agents/tester.md': TESTER_AGENT.replace('<browser>', 'msedge'),
     });

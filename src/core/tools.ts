@@ -6,6 +6,7 @@ import type {
   ToolStatus,
 } from './events.js';
 import type { FileChanges } from './changes.js';
+import type { ToolImage } from './messages.js';
 import type { HookContext, HookRunner } from './hooks.js';
 import type { ModelClient } from './model.js';
 import type { PermissionPolicy, ToolKind } from './permissions.js';
@@ -115,7 +116,14 @@ export interface PlanControl {
   build(): void;
 }
 
-export type ToolOutput = string | { output: string; isError?: boolean };
+export type ToolOutput =
+  | string
+  | {
+      output: string;
+      isError?: boolean;
+      /** Images for models that can see them, such as a screenshot; describe them in `output`. */
+      images?: ToolImage[];
+    };
 
 /**
  * Tool state under keys with this prefix describes what the model has seen in the conversation

@@ -2,6 +2,8 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { loadInstructions } from '../../config/instructions.js';
 import { heawHome } from '../../config/project.js';
+import { loadAgentDefinitions } from '../../agents/definitions.js';
+import type { ModelClient } from '../../core/model.js';
 import type { PermissionMode } from '../../core/permissions.js';
 import type { Workspace } from '../../core/workspace.js';
 import type { EngineOptions } from '../../engine.js';
@@ -104,7 +106,13 @@ export async function evalCommand(
     createWorkspace,
     createEngine: async (workspace, evalCase) =>
       context.createEngine(
-        await trialOptions(base, workspace, evalCase, options.mode, context.env),
+        await trialOptions(
+          { ...base, model: probe.model },
+          workspace,
+          evalCase,
+          options.mode,
+          context.env,
+        ),
       ),
   });
 
@@ -202,6 +210,9 @@ async function trialOptions(
 ): Promise<EngineOptions> {
   return {
     ...base,
+    ...(evalCase.agents && { agents: await fixtureAgents(base, workspace) }),
+    ...(evalCase.contextWindow &&
+      typeof base.model !== 'string' && { model: withWindow(base.model, evalCase.contextWindow) }),
     workspace,
     interactive: false,
     sessionStore: undefined,
@@ -215,8 +226,32 @@ async function trialOptions(
       // A flag wins, then the case; trials in a container may do anything inside it.
       mode: modeFlag ?? evalCase.mode ?? (workspace.kind === 'docker' ? 'bypass' : 'accept-edits'),
       preapproved: [...(base.permissions?.preapproved ?? []), ...evalCase.allow],
+      deny: [...(base.permissions?.deny ?? []), ...evalCase.deny],
     },
     limits: { ...base.limits, ...evalCase.limits },
+  };
+}
+
+/** The project's agents and the fixture's own (`.heaw/agents/`), which win by name. */
+async function fixtureAgents(base: EngineOptions, workspace: Workspace) {
+  // Its own `.heaw` as the personal folder too: no one's personal agents get into a trial.
+  const own = join(workspace.root, '.heaw');
+  const loaded = await loadAgentDefinitions({ projectRoot: workspace.root, heawHome: own });
+  if (loaded.problems.length) throw new Error(loaded.problems.join('\n'));
+  const names = new Set(loaded.items.map((agent) => agent.name));
+  return [...(base.agents ?? []).filter((agent) => !names.has(agent.name)), ...loaded.items];
+}
+
+/** The model with a smaller context window, so compaction comes sooner. */
+function withWindow(model: ModelClient, contextWindow: number): ModelClient {
+  const maxOutputTokens = Math.min(
+    model.capabilities.maxOutputTokens,
+    Math.floor(contextWindow / 4),
+  );
+  return {
+    id: model.id,
+    capabilities: { ...model.capabilities, contextWindow, maxOutputTokens },
+    stream: (request, signal) => model.stream(request, signal),
   };
 }
 

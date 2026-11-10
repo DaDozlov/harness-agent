@@ -3,7 +3,13 @@ import { compactHistory, type ContextMeter, usableWindow } from './context.js';
 import { isAbortError, ModelError, serializeError } from './errors.js';
 import type { EngineEvent, EngineEventBody, StopReason } from './events.js';
 import { type HookContext, type HookFailure, hookFailureEvent, type HookRunner } from './hooks.js';
-import { type AssistantMessage, type Message, toolCallsOf, userMessage } from './messages.js';
+import {
+  type AssistantMessage,
+  type Message,
+  toolCallsOf,
+  userMessage,
+  withRecentImages,
+} from './messages.js';
 import type { FinishReason, ModelClient, ModelRequest, ToolSpec } from './model.js';
 import { failureKey } from './stuck.js';
 import { executeToolCalls, type ToolRuntime } from './tool-execution.js';
@@ -26,6 +32,8 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 
 /** A `beforeStop` check that fails the same way this often in a row ends the run. */
 export const MAX_SAME_CHECK_FAILURES = 3;
+/** Tool results whose images a model that can see gets; older ones keep only their description. */
+export const IMAGES_KEPT = 3;
 
 /** The share of a limit after which the agent is asked to wrap up. */
 export const NEAR_LIMIT = 0.8;
@@ -76,6 +84,8 @@ export interface LoopOptions {
   stopCheck?: (() => Promise<string | undefined> | string | undefined) | undefined;
   /** Events to add before `run.end`, e.g. links to the commits the run made. */
   beforeEnd?: (() => Promise<EngineEventBody[]>) | undefined;
+  /** Events recorded while a hook ran (agents it started), taken after each hook. */
+  hookEvents?: (() => EngineEventBody[]) | undefined;
 }
 
 export interface RunResult {
@@ -275,6 +285,7 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         }
         const edited = options.tools.changes?.edited ?? [];
         const verdict = await hooks.beforeStop(hookContext, outcome.message, turns, edited);
+        for (const body of options.hookEvents?.() ?? []) yield stamp(body);
         yield* reported(verdict.failures);
         if (!verdict.feedback) return 'end_turn';
         yield stamp({ type: 'hook', hook: 'beforeStop', message: verdict.feedback });
@@ -322,6 +333,7 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
     }
   }
 
+  for (const body of options.hookEvents?.() ?? []) yield stamp(body);
   for (const body of (await options.beforeEnd?.().catch(() => [])) ?? []) yield stamp(body);
   const cost = costUsd === undefined ? {} : { costUsd };
   yield stamp({ type: 'run.end', stopReason, usage, turns, ...cost });
@@ -340,7 +352,10 @@ function buildRequest(options: LoopOptions, effort = options.reasoningEffort?.()
   }));
   return {
     system: options.system(),
-    messages: [...options.messages],
+    messages: withRecentImages(
+      options.messages,
+      options.model.capabilities.vision ? IMAGES_KEPT : 0,
+    ),
     ...(tools.length && { tools }),
     ...(effort && { reasoningEffort: effort }),
     ...(options.cacheKey && { cacheKey: options.cacheKey }),

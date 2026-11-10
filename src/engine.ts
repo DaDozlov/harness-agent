@@ -630,8 +630,10 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
 
   /** `HookContext.runAgent`: e.g. a reviewer's verdict in `beforeStop`. */
   const hookRunAgent = async (name: string, task: string): Promise<HookAgentResult> => {
-    const { text, stopReason, costUsd } = await runNamed(name, task, { forHook: true });
-    return { text, stopReason, ...(costUsd !== undefined && { costUsd }) };
+    const { text, stopReason, costUsd, turns, usage } = await runNamed(name, task, {
+      forHook: true,
+    });
+    return { text, stopReason, turns, usage, ...(costUsd !== undefined && { costUsd }) };
   };
 
   // Allowed for one run: nobody can be asked, so they count as approvals given in advance.

@@ -6,3 +6,5 @@ package-lock.json
 evals/fixtures/
 # Markdown is written by hand (aligned tables and diagrams); Prettier would reflow it.
 **/*.md
+# Build output in reference solutions: compared byte for byte with what the build writes
+evals/solutions/*/files/out/

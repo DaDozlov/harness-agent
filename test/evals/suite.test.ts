@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { cp, readFile } from 'node:fs/promises';
+import { cp, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createEngine } from '../../src/engine.js';
@@ -21,11 +21,17 @@ const { items: cases, problems } = await loadEvalCases(SUITE);
 async function trial(evalCase: EvalCase, solved: boolean): Promise<TrialResult> {
   const solution = join(SUITE, 'solutions', evalCase.name);
   const files = join(solution, 'files');
+  // Paths the solution removes, one per line (a solution's files can only add or replace).
+  const deleted = existsSync(join(solution, 'delete.txt'))
+    ? (await readFile(join(solution, 'delete.txt'), 'utf8')).split('\n').filter(Boolean)
+    : [];
   const answer =
     solved && existsSync(join(solution, 'answer.md'))
       ? await readFile(join(solution, 'answer.md'), 'utf8')
       : 'Done.';
-  const report = await runEvals([evalCase], {
+  // What only a run with a model shows (tool calls, compaction) is not tested here.
+  const checks = evalCase.checks.filter((check) => !('called' in check || 'compactions' in check));
+  const report = await runEvals([{ ...evalCase, checks }], {
     model: 'scripted:test',
     trials: 1,
     // What a judge would say is not tested here: only what commands and texts can show.
@@ -34,6 +40,11 @@ async function trial(evalCase: EvalCase, solved: boolean): Promise<TrialResult> 
     createEngine: async (workspace) => {
       if (solved && existsSync(files)) {
         await cp(files, workspace.root, { recursive: true, force: true });
+      }
+      if (solved) {
+        for (const path of deleted) {
+          await rm(join(workspace.root, path.trim()), { recursive: true, force: true });
+        }
       }
       return createEngine({
         model: new ScriptedModelClient([{ text: answer }]),

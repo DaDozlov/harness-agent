@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { CallToolResult, Tool as McpTool } from '@modelcontextprotocol/client';
+import type { ToolImage } from '../core/messages.js';
 import type { Tool, ToolOutput } from '../core/tools.js';
 import type { McpConnection } from './connection.js';
 
@@ -48,13 +49,18 @@ export function adaptMcpTool(connection: McpConnection, tool: McpTool): Tool {
   };
 }
 
-/** MCP results are lists of content parts; the model gets text, with non-text parts described. */
+/**
+ * MCP results are lists of content parts; the model gets text, with other parts described, and
+ * images also as images (a model that can see gets them, see `ToolResultPart.images`).
+ */
 export function resultToOutput(result: CallToolResult): ToolOutput {
+  const images: ToolImage[] = [];
   const parts = (result.content ?? []).map((part) => {
     switch (part.type) {
       case 'text':
         return part.text;
       case 'image':
+        images.push({ mediaType: part.mimeType, data: part.data });
         return `[image, ${part.mimeType}, ${Buffer.byteLength(part.data, 'base64')} bytes]`;
       case 'audio':
         return `[audio, ${part.mimeType}]`;
@@ -70,7 +76,8 @@ export function resultToOutput(result: CallToolResult): ToolOutput {
     parts.push(JSON.stringify(result.structuredContent, null, 2));
   }
   const output = parts.join('\n') || '(no output)';
-  return result.isError ? { output, isError: true } : output;
+  if (result.isError) return { output, isError: true };
+  return images.length ? { output, images } : output;
 }
 
 /** The tools of one connected server, after includeTools / excludeTools. */

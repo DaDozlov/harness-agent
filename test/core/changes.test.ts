@@ -154,10 +154,21 @@ describe('runAgent in hooks', () => {
       },
     );
 
-    await collect(engine.session().send('Change the answer'));
+    const events = await collect(engine.session().send('Change the answer'));
     await engine.dispose();
 
     expect(seen).toEqual([true, true, true]);
+    // The user sees that the reviewer ran, and its last line.
+    expect(events.filter((event) => event.type.startsWith('subagent.'))).toMatchObject([
+      { type: 'subagent.start', name: 'reviewer', task: 'Review the change' },
+      {
+        type: 'subagent.end',
+        name: 'reviewer',
+        stopReason: 'end_turn',
+        turns: 1,
+        summary: 'Looks wrong: answer should be 42.',
+      },
+    ]);
     expect(model.requests[1]?.system).toContain('You review changes.');
     expect(JSON.stringify(model.requests[2]?.messages.at(-1))).toContain(
       'Looks wrong: answer should be 42.',

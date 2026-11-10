@@ -28,8 +28,56 @@ export interface ToolResultPart {
   type: 'tool-result';
   callId: string;
   name: string;
+  /** The result as text; images are also described here, for models that cannot see them. */
   output: string;
   isError?: boolean;
+  /** Images that come with the result, such as a screenshot of a page. Never saved. */
+  images?: ToolImage[];
+}
+
+/** An image in a tool result: base64 data and its media type, e.g. `image/png`. */
+export interface ToolImage {
+  mediaType: string;
+  data: string;
+}
+
+/** The message without the images of its tool results. */
+export function withoutImages(message: Message): Message {
+  if (message.role !== 'tool' || !message.content.some((part) => part.images)) return message;
+  return {
+    ...message,
+    content: message.content.map(textOnly),
+  };
+}
+
+function textOnly(part: ToolResultPart): ToolResultPart {
+  if (!part.images) return part;
+  const copy = { ...part };
+  delete copy.images;
+  return copy;
+}
+
+/**
+ * The history with images only in the `keep` latest tool results that have any: each costs
+ * about a thousand tokens on every later call, and an old screenshot shows a page as it was.
+ * Their descriptions stay in the text.
+ */
+export function withRecentImages(messages: readonly Message[], keep: number): Message[] {
+  let kept = 0;
+  const result: Message[] = [];
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role !== 'tool' || !message.content.some((part) => part.images?.length)) {
+      result.push(message);
+      continue;
+    }
+    const content = message.content.map((part) => {
+      if (!part.images?.length) return part;
+      return kept++ < keep ? part : textOnly(part);
+    });
+    result.push({ ...message, content });
+  }
+  return result.reverse();
 }
 
 export interface UserMessage {

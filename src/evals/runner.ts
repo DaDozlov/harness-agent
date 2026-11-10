@@ -189,6 +189,13 @@ async function runTrial(
     // Taken before the checks run: what they add (hidden tests, build output) is not the agent's.
     const changes = await agentChanges(dir);
 
+    const events = records.flatMap((record) => (record.type === 'event' ? [record.event] : []));
+    const calls = new Map<string, number>();
+    for (const event of events) {
+      if (event.type === 'tool.start') calls.set(event.tool, (calls.get(event.tool) ?? 0) + 1);
+    }
+    const compactions = events.filter((event) => event.type === 'compaction').length;
+
     const checks: CheckResult[] = [];
     for (const check of evalCase.checks) {
       const result = await runCheck(check, {
@@ -196,6 +203,8 @@ async function runTrial(
         workspace,
         answer,
         turns,
+        calls,
+        compactions,
         changes,
         evalCase,
         judge: options.judge,
@@ -244,6 +253,9 @@ async function runCheck(
     workspace: Workspace;
     answer: string;
     turns: number;
+    /** Tool calls by name, the sub-agents' included. */
+    calls: ReadonlyMap<string, number>;
+    compactions: number;
     /** The agent's changes as a diff. */
     changes: string;
     evalCase: EvalCase;
@@ -251,6 +263,29 @@ async function runCheck(
   },
 ): Promise<{ result: CheckResult; usage: Usage }> {
   const none = emptyUsage();
+  if ('called' in check) {
+    const count = trial.calls.get(check.called) ?? 0;
+    const passed = count >= check.atLeast;
+    return {
+      result: {
+        check: `${check.called} called at least ${check.atLeast} time${check.atLeast === 1 ? '' : 's'}`,
+        passed,
+        ...(!passed && { detail: `called ${count} time${count === 1 ? '' : 's'}` }),
+      },
+      usage: none,
+    };
+  }
+  if ('compactions' in check) {
+    const passed = trial.compactions >= check.compactions;
+    return {
+      result: {
+        check: `compacted at least ${check.compactions} time${check.compactions === 1 ? '' : 's'}`,
+        passed,
+        ...(!passed && { detail: `compacted ${trial.compactions} times` }),
+      },
+      usage: none,
+    };
+  }
   if ('maxTurns' in check) {
     const passed = trial.turns <= check.maxTurns;
     return {

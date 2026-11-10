@@ -376,7 +376,7 @@ export const glob = defineTool({
   description:
     'Find files by name pattern, e.g. "**/*.ts" or "src/**/test_*.py". A pattern without "/" ' +
     'matches file names at any depth ("*.md" finds every Markdown file). Respects .gitignore ' +
-    'and skips hidden files.',
+    'and skips hidden files unless the pattern or path names one (".github/**").',
   kind: 'read',
   subjectType: 'path',
   parameters: z.object({
@@ -394,6 +394,7 @@ export const glob = defineTool({
         'path',
         '--path-separator',
         '/',
+        ...hiddenFlags(pattern, path),
         '--glob',
         pattern,
         ...target,
@@ -413,7 +414,7 @@ export const grep = defineTool({
   description:
     'Search file contents with a regular expression (ripgrep syntax). Returns matching file ' +
     'paths by default, or matching lines with line numbers when output is "content". ' +
-    'Respects .gitignore and skips hidden files.',
+    'Respects .gitignore and skips hidden files unless the glob or path names one.',
   kind: 'read',
   subjectType: 'path',
   parameters: z.object({
@@ -445,6 +446,7 @@ export const grep = defineTool({
       '--max-columns-preview',
     ];
     if (args.ignore_case) flags.push('--ignore-case');
+    flags.push(...hiddenFlags(args.glob, args.path));
     if (args.glob) flags.push('--glob', args.glob);
     if (args.output === 'files') flags.push('--files-with-matches', '--sort', 'path');
     else
@@ -463,6 +465,18 @@ export const grep = defineTool({
     return limitLines(result.stdout, MAX_GREP_LINES, args.output === 'files' ? 'files' : 'lines');
   },
 });
+
+/**
+ * ripgrep skips hidden files, so `.heaw/**` or `.github/workflows/*.yml` would find nothing and
+ * the agent would think there are none. A pattern or path that names a hidden folder or file
+ * searches hidden ones too. (`.git` stays out unless named.)
+ */
+function hiddenFlags(...patterns: Array<string | undefined>): string[] {
+  const namesHidden = patterns.some(
+    (pattern) => pattern !== undefined && /(?:^|[\\/])\.(?!\.?(?:[\\/]|$))/.test(pattern),
+  );
+  return namesHidden ? ['--hidden', '--glob', '!.git/'] : [];
+}
 
 /** ripgrep prefixes results with the path argument, so the root is searched without one. */
 function searchTarget(path: string, workspace: ToolContext['workspace']): string[] {

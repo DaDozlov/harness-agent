@@ -17,7 +17,7 @@ import {
   type RunResult,
   runLoop,
 } from './loop.js';
-import type { Message } from './messages.js';
+import { type Message, withoutImages } from './messages.js';
 import type { ModelClient, ToolSpec } from './model.js';
 import { type PermissionMode, PermissionPolicy, type PermissionRules } from './permissions.js';
 import { completedTodos, droppedSteps, PLAN_FILE, readPlanSteps } from './plan.js';
@@ -179,6 +179,8 @@ export class Session {
   readonly #changes: FileChanges;
   readonly #ownsChanges: boolean;
   readonly #runAgent: HookContext['runAgent'];
+  /** Sub-agent events of agents a hook ran, until the loop passes them on. */
+  readonly #pendingHookEvents: EngineEventBody[] = [];
   /** Told to the model with the next input, e.g. that files were rewound. */
   readonly #notes: string[] = [];
   readonly #intent: string | undefined;
@@ -242,7 +244,7 @@ export class Session {
     this.#workspace = options.workspace ?? noWorkspace();
     this.#ownsChanges = !options.changes;
     this.#changes = options.changes ?? new FileChanges(this.#workspace);
-    this.#runAgent = options.runAgent;
+    this.#runAgent = options.runAgent && this.#shownRuns(options.runAgent);
     this.#intent = options.intent;
     this.#trackGit = options.trackGit ?? false;
     this.#stats = options.stats ?? new UsageStats();
@@ -496,6 +498,7 @@ export class Session {
         compactAt: this.#compactAt,
         intent: this.#intent,
         beforeEnd: () => this.#commitLinks(base, started),
+        hookEvents: () => this.#takeHookEvents(),
         stopCheck: async () => this.#verifyReminder() ?? (await this.#planReminder()),
         reasoningEffort: () => this.#reasoningEffort,
         // One per agent kind in this session: parallel sub-agents of a kind share a prompt start.
@@ -657,6 +660,36 @@ export class Session {
     const result = await this.#hooks.sessionStart(context, this.#resumed);
     this.#startContext = result.context;
     for (const failure of result.failures) yield this.#stamp(hookFailureEvent(failure));
+  }
+
+  /**
+   * A hook's agent runs (a tester or reviewer in `beforeStop`), recorded as sub-agent events so
+   * the user and the session log see that they ran and what they said; the loop passes them on
+   * once the hook returns (`hookEvents`).
+   */
+  #shownRuns(runAgent: NonNullable<HookContext['runAgent']>): HookContext['runAgent'] {
+    let count = 0;
+    return async (name, task) => {
+      const childAgentId = `${name}-hook-${++count}`;
+      this.#pendingHookEvents.push({ type: 'subagent.start', childAgentId, name, task });
+      const result = await runAgent(name, task);
+      const summary = result.text.trim().split('\n').at(-1)?.trim();
+      this.#pendingHookEvents.push({
+        type: 'subagent.end',
+        childAgentId,
+        name,
+        stopReason: result.stopReason,
+        turns: result.turns ?? 0,
+        usage: result.usage ?? emptyUsage(),
+        ...(result.costUsd !== undefined && { costUsd: result.costUsd }),
+        ...(summary && { summary: summary.slice(0, 200) }),
+      });
+      return result;
+    };
+  }
+
+  #takeHookEvents(): EngineEventBody[] {
+    return this.#pendingHookEvents.splice(0);
   }
 
   #hookContext(signal: AbortSignal): HookContext {
@@ -866,7 +899,12 @@ export class Session {
         ...(this.#git && { git: this.#git }),
       });
     }
-    records.push(record);
+    // Screenshots are hundreds of kilobytes each; their descriptions stay in the text.
+    if (record.type === 'message')
+      records.push({ ...record, message: withoutImages(record.message) });
+    else if (record.type === 'compaction') {
+      records.push({ ...record, messages: record.messages.map(withoutImages) });
+    } else records.push(record);
     this.#saving = this.#saving
       .then(() => store.append(this.id, records))
       .catch((error: unknown) => {

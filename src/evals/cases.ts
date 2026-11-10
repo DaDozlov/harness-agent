@@ -20,7 +20,11 @@ export type EvalCheck =
   | { answerContains: string }
   | { file: string; exists: boolean; contains?: string }
   /** The run took at most this many model turns: what a task should cost, not only its result. */
-  | { maxTurns: number };
+  | { maxTurns: number }
+  /** A tool was called at least this often, by the agent or its sub-agents, e.g. `delegate`. */
+  | { called: string; atLeast: number }
+  /** The history was compacted at least this often: the case tests work across a compaction. */
+  | { compactions: number };
 
 /** An eval case (docs/DESIGN.md §4.16), from `evals/<name>.yaml`. */
 export interface EvalCase {
@@ -41,6 +45,12 @@ export interface EvalCase {
   /** Default: `bypass` in a Docker workspace, otherwise `accept-edits`. */
   mode?: PermissionMode;
   allow: string[];
+  /** Calls refused in this case, besides the project's deny rules, e.g. a command to work around. */
+  deny: string[];
+  /** The agents in the workspace's `.heaw/agents/` (the fixture's own), e.g. a tester. */
+  agents: boolean;
+  /** A smaller context window than the model's, so a short task reaches compaction. */
+  contextWindow?: number;
   limits: { maxTurns?: number; maxCostUsd?: number; maxMinutes?: number };
   checks: EvalCheck[];
 }
@@ -59,6 +69,9 @@ const caseSchema = z
     setup: z.string().min(1).optional(),
     mode: z.enum(PERMISSION_MODES as [PermissionMode, ...PermissionMode[]]).optional(),
     allow: z.array(z.string()).default([]),
+    deny: z.array(z.string()).default([]),
+    agents: z.boolean().default(false),
+    contextWindow: z.number().int().min(4_000).optional(),
     limits: z
       .object({
         maxTurns: z.number().int().positive().optional(),
@@ -90,6 +103,13 @@ const caseSchema = z
               })
               .strict(),
             z.object({ maxTurns: z.number().int().positive() }).strict(),
+            z
+              .object({
+                called: z.string().min(1),
+                atLeast: z.number().int().positive().default(1),
+              })
+              .strict(),
+            z.object({ compactions: z.number().int().positive() }).strict(),
           ]),
         )
         .min(1, 'add at least one check, or nothing can fail'),
@@ -151,6 +171,9 @@ export function parseEvalCase(text: string, source: string): EvalCase {
     ...(data.setup && { setup: data.setup }),
     ...(data.mode && { mode: data.mode }),
     allow: data.allow,
+    deny: data.deny,
+    agents: data.agents,
+    ...(data.contextWindow && { contextWindow: data.contextWindow }),
     limits: data.limits,
     // Like the fixture, a check's files are named relative to the case file.
     checks: data.checks.map((check) =>

@@ -36,6 +36,9 @@ checks:
 | `trials` | Runs per case (default 1; use 3+ to compare) |
 | `setup` | Command before the agent starts, e.g. `npm ci` |
 | `mode`, `allow`, `limits` | Per case; mode defaults to `accept-edits` (`bypass` in Docker). `allow` also gives approvals nobody is there to give, e.g. `finish_plan` |
+| `deny` | Deny rules added for this case, e.g. a command the agent has to do without |
+| `agents: true` | The fixture's own `.heaw/agents/` join the project's, e.g. a tester with its browser server |
+| `contextWindow` | A smaller context window than the model's (at least 4,000), so a short task reaches compaction |
 | `checks` | All must pass, and the run must finish on its own |
 
 | Check | Passes when |
@@ -45,6 +48,8 @@ checks:
 | `answerContains: <text>` | The final answer contains the text |
 | `judge: <criterion>` | A model reading the task, the answer and the agent's `git diff` agrees |
 | `maxTurns: <n>` | The run took at most `n` model turns |
+| `called: <tool>` (`atLeast: <n>`) | The tool was called at least `n` times (default 1), sub-agents included, e.g. `delegate`, or a browser's screenshot tool |
+| `compactions: <n>` | The history was compacted at least `n` times, so the case really tests work across a compaction |
 
 Each trial runs in a fresh temp folder with the project's config, but without MCP servers, saved sessions or the tools that look at the project itself, and with the fixture's own AGENTS.md.
 

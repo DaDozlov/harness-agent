@@ -170,6 +170,8 @@ export type EngineEventBody =
       turns: number;
       usage: Usage;
       costUsd?: number;
+      /** The last line of its answer, e.g. a verdict; set for agents a hook ran. */
+      summary?: string;
     }
   /**
    * Something the run produced outside the conversation, to link the session to it

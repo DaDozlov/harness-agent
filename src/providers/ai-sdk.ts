@@ -6,6 +6,7 @@ import {
   type LanguageModelV4FinishReason,
   type LanguageModelV4Prompt,
   type LanguageModelV4ToolCall,
+  type LanguageModelV4ToolResultOutput,
   type LanguageModelV4Usage,
 } from '@ai-sdk/provider';
 import { isAbortError, ModelError } from '../core/errors.js';
@@ -15,6 +16,7 @@ import type {
   ReasoningPart,
   TextPart,
   ToolCallPart,
+  ToolResultPart,
 } from '../core/messages.js';
 import type {
   FinishReason,
@@ -40,11 +42,14 @@ export class AiSdkModelClient implements ModelClient {
   #inline = false;
   /** The model refused a reasoning effort (it does not reason): from then on, none is sent. */
   #noReasoning = false;
+  /** Whether tool results can carry images to this API; otherwise only their descriptions go. */
+  readonly #images: boolean;
 
   constructor(id: string, model: LanguageModelV4, capabilities: ModelCapabilities) {
     this.id = id;
     this.#model = model;
     this.capabilities = capabilities;
+    this.#images = capabilities.vision && takesImagesInToolResults(model.provider);
   }
 
   /**
@@ -93,7 +98,7 @@ export class AiSdkModelClient implements ModelClient {
 
     try {
       const { stream } = await this.#model.doStream(
-        toCallOptions(request, signal, { inline: this.#inline }),
+        toCallOptions(request, signal, { inline: this.#inline, images: this.#images }),
       );
       for await (const part of stream) {
         switch (part.type) {
@@ -147,10 +152,26 @@ export class AiSdkModelClient implements ModelClient {
   }
 }
 
+/**
+ * The OpenAI Responses API (also Azure's) and Anthropic take images in tool results. Chat
+ * Completions APIs (OpenAI-compatible servers such as Ollama) would get them as JSON text:
+ * megabytes of base64 in place of a picture.
+ */
+export function takesImagesInToolResults(provider: string): boolean {
+  return provider.endsWith('.responses') || provider.startsWith('anthropic');
+}
+
+interface PromptOptions {
+  /** Send the history inline instead of referring to stored items. */
+  inline?: boolean;
+  /** Send the images of tool results as images. */
+  images?: boolean;
+}
+
 export function toCallOptions(
   request: ModelRequest,
   signal?: AbortSignal,
-  options: { inline?: boolean } = {},
+  options: PromptOptions = {},
 ): LanguageModelV4CallOptions {
   const tools = request.tools?.map((tool) => ({
     type: 'function' as const,
@@ -191,7 +212,7 @@ function providerOptionsOf(request: ModelRequest): { providerOptions?: ProviderO
 /** `inline`: without the ids of stored items, so nothing refers to items the provider keeps. */
 export function toPrompt(
   request: ModelRequest,
-  options: { inline?: boolean } = {},
+  options: PromptOptions = {},
 ): LanguageModelV4Prompt {
   const prompt: LanguageModelV4Prompt = [];
   if (request.system) prompt.push({ role: 'system', content: request.system });
@@ -228,15 +249,29 @@ export function toPrompt(
             type: 'tool-result',
             toolCallId: part.callId,
             toolName: part.name,
-            output: part.isError
-              ? { type: 'error-text', value: part.output }
-              : { type: 'text', value: part.output },
+            output: toolOutput(part, options.images === true),
           })),
         });
         break;
     }
   }
   return prompt;
+}
+
+function toolOutput(part: ToolResultPart, images: boolean): LanguageModelV4ToolResultOutput {
+  if (part.isError) return { type: 'error-text', value: part.output };
+  if (!images || !part.images?.length) return { type: 'text', value: part.output };
+  return {
+    type: 'content',
+    value: [
+      { type: 'text', text: part.output },
+      ...part.images.map((image) => ({
+        type: 'file' as const,
+        mediaType: image.mediaType,
+        data: { type: 'data' as const, data: image.data },
+      })),
+    ],
+  };
 }
 
 /** Provider metadata from a response goes back to the same provider as provider options. */
