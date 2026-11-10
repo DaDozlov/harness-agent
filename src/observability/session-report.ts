@@ -518,9 +518,19 @@ function otherSessions(others: SessionSummary[]): string {
 
 /** One run step by step: calls (with failures), answers, what heaw did, the agent's words. */
 export function runSteps(records: SessionRecord[], number: number): string {
-  const runs = runsOf(records);
-  const run = runs[number - 1];
-  if (!run) return `There is no run ${number}; this session has ${runs.length}.`;
+  const runs = runsOf(records).length;
+  const lines = stepLines(records, number);
+  if (!lines) return `There is no run ${number}; this session has ${runs}.`;
+  return `# Run ${number} of ${runs}, step by step\n${lines.join('\n')}`;
+}
+
+/**
+ * The lines of `runSteps`, or undefined without such a run. Also what an eval trial keeps in its
+ * report, so a failed trial can be understood without running it again.
+ */
+export function stepLines(records: SessionRecord[], number = 1): string[] | undefined {
+  const run = runsOf(records)[number - 1];
+  if (!run) return undefined;
   const turnOf = new Map<string, number>();
   const lines: string[] = [];
   for (const record of records.slice(run.from, run.to + 1)) {
@@ -533,15 +543,13 @@ export function runSteps(records: SessionRecord[], number: number): string {
     const step = steps(record.event, agentOf(record.event), turnOf);
     if (step) lines.push(step);
   }
-  const shown =
-    lines.length > MAX_STEPS
-      ? [
-          ...lines.slice(0, 150),
-          `… ${lines.length - MAX_STEPS} steps left out …`,
-          ...lines.slice(-(MAX_STEPS - 150)),
-        ]
-      : lines;
-  return `# Run ${number} of ${runs.length}, step by step\n${shown.join('\n')}`;
+  return lines.length > MAX_STEPS
+    ? [
+        ...lines.slice(0, 150),
+        `… ${lines.length - MAX_STEPS} steps left out …`,
+        ...lines.slice(-(MAX_STEPS - 150)),
+      ]
+    : lines;
 }
 
 function steps(event: EngineEvent, who: string, turnOf: Map<string, number>): string | undefined {

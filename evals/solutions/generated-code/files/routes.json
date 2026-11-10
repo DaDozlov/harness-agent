@@ -1,0 +1,5 @@
+[
+  { "method": "GET", "path": "/health", "handler": "health" },
+  { "method": "GET", "path": "/users", "handler": "listUsers" },
+  { "method": "GET", "path": "/version", "handler": "version" }
+]

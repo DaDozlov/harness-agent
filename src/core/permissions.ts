@@ -43,6 +43,11 @@ export interface PermissionRestriction {
   deny?: string[] | undefined;
   /** Globs of the only files write tools may change. */
   writable?: string[] | undefined;
+  /**
+   * Tools the agent brought itself (the MCP servers in its agent file): allowed in any mode, since
+   * the user gave them to this agent, unless a deny rule matches.
+   */
+  own?: ((toolName: string) => boolean) | undefined;
 }
 
 export interface Subject {
@@ -289,6 +294,7 @@ class RestrictedPolicy extends PermissionPolicy {
   readonly #base: PermissionPolicy;
   readonly #mode: PermissionMode | undefined;
   readonly #writable: string[] | undefined;
+  readonly #own: ((toolName: string) => boolean) | undefined;
 
   constructor(base: PermissionPolicy, restriction: PermissionRestriction) {
     // Its own rules are only the deny rules: bypass leaves everything else to `base` and the mode.
@@ -296,6 +302,7 @@ class RestrictedPolicy extends PermissionPolicy {
     this.#base = base;
     this.#mode = restriction.mode;
     this.#writable = restriction.writable;
+    this.#own = restriction.own;
   }
 
   override get mode(): PermissionMode {
@@ -313,6 +320,11 @@ class RestrictedPolicy extends PermissionPolicy {
     subject: Subject | undefined,
   ): PermissionCheck {
     let result = stricter(this.#base.check(tool, subject), super.check(tool, subject));
+    if (this.#own?.(tool.name)) {
+      return result.decision === 'deny' && !result.byMode
+        ? result
+        : { decision: 'allow', reason: "it is a tool of the agent's own MCP server" };
+    }
     if (this.#writable && tool.kind === 'write' && subject?.type === 'path') {
       const nocase = process.platform === 'win32';
       const inside = this.#writable.some((pattern) =>

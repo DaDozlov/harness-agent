@@ -196,6 +196,36 @@ describe('building an approved plan', () => {
     expect(JSON.stringify(model.requests[1]?.messages.at(-1))).not.toContain('open step');
   });
 
+  it('sends a new conversation that goes on with the plan on to the next step', async () => {
+    const { engine, model, workspace } = await engineWith([
+      call('read_file', { path: 'PLAN.md' }),
+      tick(2),
+      { text: 'Step 2 is done.' },
+      tick(3),
+      { text: 'All steps are done.' },
+    ]);
+    await workspace.writeFile('PLAN.md', PLAN.replace('- [ ] 1.', '- [x] 1.'));
+
+    const events = await run(engine.session(), 'Please continue.');
+    await engine.dispose();
+
+    expect(nudges(events)).toHaveLength(1);
+    expect(JSON.stringify(model.requests[3]?.messages.at(-1))).toContain(
+      'PLAN.md still has 1 open step; the next is: 3. Report',
+    );
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', stopReason: 'end_turn' });
+  });
+
+  it('leaves a new conversation about something else alone, though the plan has open steps', async () => {
+    const { engine } = await engineWith([{ text: 'The tests use node --test.' }]);
+    await engine.workspace.writeFile('PLAN.md', PLAN);
+
+    const events = await run(engine.session(), 'How are the tests run?');
+    await engine.dispose();
+
+    expect(nudges(events)).toHaveLength(0);
+  });
+
   it('leaves the agent alone in a later run about something else, and stops once all is done', async () => {
     const { engine } = await engineWith([
       ...approved,

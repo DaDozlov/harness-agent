@@ -1,0 +1,15 @@
+description: >-
+  A new conversation in a project whose PLAN.md has two steps left. The message says only
+  "continue": heaw tells the agent about the open steps, and it does them and ticks them. From a
+  build that stopped at its cost limit, after which the user had to explain where to go on.
+fixture: ./fixtures/plan-in-progress
+prompt: Please continue.
+limits:
+  maxTurns: 25
+  maxCostUsd: 0.75
+checks:
+  - command: npm test
+  - command: node --test acceptance/store.test.js
+    files: ./checks/continue-plan
+  - command: node acceptance/plan.mjs
+    files: ./checks/continue-plan

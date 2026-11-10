@@ -11,6 +11,11 @@ export function formatTable(header: string[], rows: string[][]): string[] {
   return [line(header), ...rows.map(line)];
 }
 
+/** An average of whole numbers: 7 → 7, 7.333 → 7.3. */
+export function average(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
 /** 1234 → 1.2k. */
 export function shortCount(count: number): string {
   return count >= 1000 ? `${(count / 1000).toFixed(1)}k` : String(Math.round(count));

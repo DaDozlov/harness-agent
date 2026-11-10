@@ -1,0 +1,11 @@
+{
+  "name": "customer-schema",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "check:schema": "acme-schemacheck schema/customer.schema.json",
+    "verify": "npm test && npm run check:schema"
+  }
+}

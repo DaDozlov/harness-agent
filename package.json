@@ -49,6 +49,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "npm run typecheck && npm run lint && npm run lint:deps && npm run format:check && npm test",
+    "eval": "npm run build && node dist/cli.js eval",
     "changeset": "changeset",
     "release": "npm run build && changeset publish",
     "prepublishOnly": "npm run check && npm run build"

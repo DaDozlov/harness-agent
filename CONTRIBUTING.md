@@ -18,7 +18,8 @@ npm run dev        # rebuild dist/ on change; npm link for a global `heaw`
 - **Style**: TypeScript strict, ESM, `.js` in relative imports; Prettier for code (Markdown by hand).
 - **Tests**: vitest in `test/`, with the scripted model instead of real APIs and a temporary `HEAW_HOME`. Must pass on Windows, macOS and Linux.
 - **Examples** are type-checked and loaded by `test/examples.test.ts`; keep them working.
-- **Agent behaviour** changes (prompts, tool descriptions, hooks): run `heaw eval --compare latest` in `examples/coding-agent` before and after.
+- **Agent behaviour** changes (prompts, tool descriptions, the loop, built-in skills): run heaw's eval suite before and after, `npm run eval -- --trials 3` and then `npm run eval -- --trials 3 --compare latest`. It needs a model (`HEAW_MODEL` and its key in `.env`); what it costs and what the cases check is in [evals/README.md](evals/README.md).
+- **Eval cases** (`evals/`) have a reference solution each; `test/evals/suite.test.ts` checks that every case passes with it and fails without.
 
 ## Releases
 

@@ -1,4 +1,4 @@
-import { formatTable, localTime, shortCount } from './format.js';
+import { average, formatTable, localTime, shortCount } from './format.js';
 import type { CaseResult, EvalReport } from './runner.js';
 
 export interface CaseComparison {
@@ -7,7 +7,10 @@ export interface CaseComparison {
   change: 'better' | 'worse' | 'same' | 'new' | 'removed';
 }
 
-/** Each case's pass rate, tokens and cost before and after, e.g. a prompt or model change. */
+/**
+ * Each case's pass rate, turns, tokens, cost and time before and after: a change to a prompt,
+ * hook or skill, or another model (the summary lines name the model of each report).
+ */
 export function compareReports(
   before: EvalReport,
   after: EvalReport,
@@ -26,18 +29,37 @@ export function compareReports(
     return [
       name,
       `${passed(old)} → ${passed(now)}`,
+      `${turns(old)} → ${turns(now)}`,
       `${tokens(old)} → ${tokens(now)}`,
       `${cost(old)} → ${cost(now)}`,
+      `${time(old)} → ${time(now)}`,
       cases[index]!.change,
     ];
   });
   const worse = cases.filter((item) => item.change === 'worse').map((item) => item.name);
+  const header = [
+    'case',
+    'passed',
+    'turns/trial',
+    'tokens/trial',
+    'cost/trial',
+    'time/trial',
+    'change',
+  ];
+  const judges =
+    before.judgeModel && after.judgeModel && before.judgeModel !== after.judgeModel
+      ? [
+          `Judged by different models (${before.judgeModel}, then ${after.judgeModel}): ` +
+            'judge checks may not compare. Use the same --judge-model for both runs.',
+        ]
+      : [];
   const text = [
-    ...formatTable(['case', 'passed', 'tokens/trial', 'cost/trial', 'change'], rows),
+    ...formatTable(header, rows),
     '',
     `before: ${summary(before)}`,
     `after:  ${summary(after)}`,
     ...(worse.length ? [`Worse: ${worse.join(', ')}`] : []),
+    ...judges,
   ].join('\n');
   return { cases, text };
 }
@@ -65,13 +87,28 @@ function passed(item: CaseResult | undefined): string {
   return item ? `${item.passed}/${item.trials.length}` : '—';
 }
 
+/** The mean over a case's trials, or undefined without trials. */
+function mean(
+  item: CaseResult | undefined,
+  value: (trial: CaseResult['trials'][number]) => number,
+): number | undefined {
+  if (!item?.trials.length) return undefined;
+  return item.trials.reduce((sum, trial) => sum + value(trial), 0) / item.trials.length;
+}
+
+function turns(item: CaseResult | undefined): string {
+  const value = mean(item, (trial) => trial.turns);
+  return value === undefined ? '—' : average(value);
+}
+
 function tokens(item: CaseResult | undefined): string {
-  if (!item?.trials.length) return '—';
-  const total = item.trials.reduce(
-    (sum, trial) => sum + trial.usage.inputTokens + trial.usage.outputTokens,
-    0,
-  );
-  return shortCount(total / item.trials.length);
+  const value = mean(item, (trial) => trial.usage.inputTokens + trial.usage.outputTokens);
+  return value === undefined ? '—' : shortCount(value);
+}
+
+function time(item: CaseResult | undefined): string {
+  const value = mean(item, (trial) => trial.durationMs);
+  return value === undefined ? '—' : `${Math.round(value / 1000)}s`;
 }
 
 function cost(item: CaseResult | undefined): string {
@@ -83,5 +120,6 @@ function cost(item: CaseResult | undefined): string {
 
 function summary(report: EvalReport): string {
   const price = report.costUsd === undefined ? '' : ` · $${report.costUsd.toFixed(4)}`;
-  return `${report.passed}/${report.total} passed · ${report.model}${price} · ${localTime(report.startedAt)}`;
+  const took = ` · ${Math.round(report.durationMs / 60_000)} min`;
+  return `${report.passed}/${report.total} passed · ${report.model}${price}${took} · ${localTime(report.startedAt)}`;
 }

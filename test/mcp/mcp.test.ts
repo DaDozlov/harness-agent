@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { type AgentDefinition, parseAgentDefinition } from '../../src/agents/definitions.js';
 import type { Tool } from '../../src/core/tools.js';
 import { createEngine } from '../../src/engine.js';
 import {
@@ -429,6 +430,125 @@ describe('MCP in the engine', () => {
     expect(model.requests[1]?.tools?.map((tool) => tool.name)).toContain('mcp__added__echo');
     expect(model.requests[2]?.messages.at(-1)?.content[0]).toMatchObject({
       output: 'echo: new tool',
+    });
+  });
+});
+
+describe("an agent's own MCP servers", () => {
+  const tester = (extra: Partial<AgentDefinition> = {}): AgentDefinition => ({
+    name: 'tester',
+    description: 'Uses the app like a user.',
+    prompt: 'You test the app.',
+    tools: ['read_file'],
+    mcpServers: [entry('browser', stdioServer())],
+    source: 'test',
+    ...extra,
+  });
+  const lastOutput = (model: ScriptedModelClient, index: number) =>
+    model.requests[index]?.messages.at(-1)?.content[0];
+
+  it('are read from the agent file, in the shape of .mcp.json', () => {
+    const file = [
+      '---',
+      'name: tester',
+      'description: Uses the app like a user.',
+      'mcpServers:',
+      '  browser:',
+      '    command: npx',
+      '    args: ["-y", "@playwright/mcp@0.0.83", "--headless"]',
+      '    excludeTools: [browser_run_code_unsafe]',
+      '---',
+      'Test it.',
+    ].join('\n');
+    const { definition } = parseAgentDefinition(file, '/p/.heaw/agents/tester.md');
+    expect(definition.mcpServers).toEqual([
+      {
+        name: 'browser',
+        config: {
+          command: 'npx',
+          args: ['-y', '@playwright/mcp@0.0.83', '--headless'],
+          excludeTools: ['browser_run_code_unsafe'],
+        },
+        source: '/p/.heaw/agents/tester.md',
+      },
+    ]);
+    const bad = file.replace('    command: npx\n', '');
+    expect(() => parseAgentDefinition(bad, 'tester.md')).toThrow(/mcpServers\.browser/);
+    const list = 'name: t\ndescription: d\nmcpServers: [browser]';
+    expect(() => parseAgentDefinition(`---\n${list}\n---\n`, 't.md')).toThrow(
+      'mcpServers must map server names to their settings',
+    );
+  });
+
+  it('give their tools to that agent only, allowed for it with nobody to ask', async () => {
+    const model = new ScriptedModelClient([
+      { toolCalls: [{ name: 'delegate', args: { agent: 'tester', task: 'Add 1 and 2' } }] },
+      { toolCalls: [{ name: 'mcp__browser__add', args: { a: 1, b: 2 } }] },
+      { text: 'It shows 3.' },
+      { text: 'The tester says 3.' },
+    ]);
+    const engine = await createEngine({
+      model,
+      toolsets: ['fs', 'agents'],
+      interactive: false,
+      git: false,
+      agents: [tester()],
+    });
+
+    await collect(engine.session().send('Test it'));
+    await engine.dispose();
+
+    const names = (index: number) => model.requests[index]?.tools?.map((tool) => tool.name) ?? [];
+    expect(names(0).some((name) => name.startsWith('mcp__'))).toBe(false);
+    expect(names(1)).toEqual(expect.arrayContaining(['read_file', 'mcp__browser__add']));
+    expect(names(1)).not.toContain('write_file');
+    expect(model.requests[1]?.system).toContain('Use echo to repeat text back.');
+    expect(model.requests[0]?.system).not.toContain('Use echo to repeat text back.');
+    expect(lastOutput(model, 2)).toMatchObject({ output: '3' });
+  });
+
+  it('that did not start are named to the agent, with why', async () => {
+    const model = new ScriptedModelClient([{ text: 'Verdict: could not test' }]);
+    const broken = entry('browser', { command: 'heaw-no-such-command-xyz' });
+    const engine = await createEngine({
+      model,
+      toolsets: ['fs'],
+      interactive: false,
+      git: false,
+      agents: [tester({ mcpServers: [broken] })],
+    });
+
+    await engine.runAgent('tester', 'Check the page');
+    await engine.dispose();
+
+    expect(model.requests[0]?.system).toMatch(
+      /The MCP server "browser" of your agent file is failed: .+\. Its tools are missing/,
+    );
+  });
+
+  it('run for a named agent run from code or a hook, and deny rules still apply', async () => {
+    const model = new ScriptedModelClient([
+      { toolCalls: [{ name: 'mcp__browser__echo', args: { text: 'hi' } }] },
+      { toolCalls: [{ name: 'mcp__browser__add', args: { a: 1, b: 2 } }] },
+      { text: 'done' },
+    ]);
+    const engine = await createEngine({
+      model,
+      toolsets: ['fs'],
+      interactive: false,
+      git: false,
+      agents: [tester()],
+      permissions: { deny: ['mcp__browser__add'] },
+    });
+
+    const result = await engine.runAgent('tester', 'Check the page');
+    await engine.dispose();
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(lastOutput(model, 1)).toMatchObject({ output: 'echo: hi' });
+    expect(lastOutput(model, 2)).toMatchObject({
+      isError: true,
+      output: expect.stringContaining('deny rule "mcp__browser__add"') as unknown,
     });
   });
 });

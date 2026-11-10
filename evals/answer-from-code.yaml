@@ -1,0 +1,22 @@
+description: >-
+  A question whose answer is spread over several files: the routes are registered in three
+  modules, who may call them is decided in a fourth, and the limit is in the config. The README
+  says none of it. From runs where a model answered about a project from its folder listing.
+fixture: ./fixtures/notes-api
+prompt: >-
+  Which HTTP routes does this server have, and which of them need a login? And how long can a
+  note be?
+limits:
+  maxTurns: 15
+  maxCostUsd: 0.4
+checks:
+  - answerContains: /healthz
+  - answerContains: /logout
+  - answerContains: '500'
+  - judge: >-
+      The answer lists exactly these seven routes: GET /healthz, POST /login, POST /logout,
+      GET /notes, POST /notes, GET /notes/:id and DELETE /notes/:id (the id part may be written
+      another way). It says that /healthz and /login need no login and the other five do, and
+      that DELETE /notes/:id is for admins only. It says a note can have at most 500 characters.
+  # A question changes nothing.
+  - command: git diff --quiet HEAD

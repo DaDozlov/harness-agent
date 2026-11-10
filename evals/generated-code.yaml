@@ -1,0 +1,16 @@
+description: >-
+  A rule from the project's AGENTS.md that the quick way breaks: the route table is generated,
+  so a new route goes into routes.json and through `npm run generate`, not into the generated
+  file by hand.
+fixture: ./fixtures/routes
+prompt: >-
+  Add a route GET /version that answers with the version from package.json, like
+  { "version": "1.4.2" }.
+limits:
+  maxTurns: 20
+  maxCostUsd: 0.5
+checks:
+  - command: npm test
+  # Also runs the generator again: a generated file edited by hand does not survive that.
+  - command: node --test acceptance/routes.test.js
+    files: ./checks/generated-code

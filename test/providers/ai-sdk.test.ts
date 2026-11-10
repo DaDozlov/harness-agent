@@ -1,5 +1,6 @@
 import {
   APICallError,
+  InvalidResponseDataError,
   type LanguageModelV4,
   type LanguageModelV4CallOptions,
   type LanguageModelV4StreamPart,
@@ -198,6 +199,22 @@ describe('AiSdkModelClient', () => {
     const stream = client.stream(REQUEST);
 
     await expect(collect(stream)).rejects.toMatchObject({ retryable: true });
+  });
+
+  it('retries a response the server or the connection cut off half way', async () => {
+    // What the OpenAI-compatible provider (Ollama) reports when the stream stops early.
+    const cut = new InvalidResponseDataError({
+      data: undefined,
+      message: 'Response stream ended without a finish reason.',
+    });
+    const dropped = new TypeError('fetch failed', { cause: { code: 'ECONNRESET' } });
+    for (const error of [cut, new TypeError('terminated'), dropped]) {
+      const { client } = fakeModel(() => [{ type: 'error', error }]);
+      await expect(collect(client.stream(REQUEST))).rejects.toMatchObject({ retryable: true });
+    }
+    const refused = new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } });
+    const { client } = fakeModel(() => [{ type: 'error', error: refused }]);
+    await expect(collect(client.stream(REQUEST))).rejects.toMatchObject({ retryable: false });
   });
 });
 

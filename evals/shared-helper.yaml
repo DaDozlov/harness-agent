@@ -1,0 +1,19 @@
+description: >-
+  Many small, independent changes: a shared helper, four pages and their four tests. Done well it
+  takes a handful of model calls, with the edits of one response made together. From a session
+  where 49 edits took 49 model calls and 78 of the run's 100 turns (docs/DESIGN.md §4.4).
+fixture: ./fixtures/shop-pages
+prompt: >-
+  The four pages in src/pages format money in four different ways and get the singular wrong
+  ("1 items", "1 orders"). Add one shared module src/format.js with formatMoney(cents), which
+  always gives the form $1,234.50, and plural(count, word), which gives "1 item" and "2 items".
+  Use both on all four pages, remove the pages' own money helpers, and update the tests.
+limits:
+  maxTurns: 30
+  maxCostUsd: 0.75
+checks:
+  - command: npm test
+  - command: node --test acceptance/pages.test.js
+    files: ./checks/shared-helper
+  # What the task should cost: about twice what a run that batches its edits needs.
+  - maxTurns: 12

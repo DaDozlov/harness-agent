@@ -2,5 +2,7 @@ dist/
 coverage/
 node_modules/
 package-lock.json
+# What the agent works on in an eval, as a project would hand it over.
+evals/fixtures/
 # Markdown is written by hand (aligned tables and diagrams); Prettier would reflow it.
 **/*.md

@@ -6,6 +6,7 @@ import { reloadChat, SetupWatcher } from '../src/cli/chat/reload.js';
 import { createEngine } from '../src/engine.js';
 import { inspectProject, loadProject } from '../src/project.js';
 import { ScriptedModelClient } from '../src/providers/scripted.js';
+import { SETUP_HARNESS_SKILL, TESTER_AGENT } from '../src/skills/built-in.js';
 import { JsonlSessionStore } from '../src/sessions/jsonl-store.js';
 import { LocalWorkspace } from '../src/workspace/local.js';
 import { collect, tempDirFactory } from './helpers.js';
@@ -73,6 +74,30 @@ describe('the setup-harness skill', () => {
     expect(loaded).toContain('# Skill: setup-harness');
     expect(loaded).toContain('check_config');
     expect(loaded).toContain('heaw applies the changed setup by itself');
+  });
+
+  it('writes a tester that loads, with a browser of its own', async () => {
+    expect(SETUP_HARNESS_SKILL.content).toContain(TESTER_AGENT.trimEnd());
+    const root = await project("export default { model: 'ollama:test' };", {
+      '.heaw/agents/tester.md': TESTER_AGENT.replace('<browser>', 'msedge'),
+    });
+
+    const setup = await loadProject(options(root));
+
+    expect(setup.warnings).toEqual([]);
+    const tester = setup.options.agents?.find((agent) => agent.name === 'tester');
+    expect(tester?.tools).toEqual([
+      'read_file',
+      'list_dir',
+      'glob',
+      'grep',
+      'run_command',
+      'command_output',
+    ]);
+    expect(tester?.mcpServers?.[0]).toMatchObject({
+      name: 'browser',
+      config: { command: 'npx', args: expect.arrayContaining(['msedge']) as unknown },
+    });
   });
 });
 

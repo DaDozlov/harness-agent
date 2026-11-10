@@ -5,11 +5,13 @@ import { dirname, join } from 'node:path';
 import type { StopReason } from '../core/events.js';
 import { lastAnswer, textOf, userMessage } from '../core/messages.js';
 import type { ModelClient } from '../core/model.js';
+import type { SessionRecord } from '../core/session-store.js';
 import { addUsage, costOf, emptyUsage, type Usage } from '../core/usage.js';
 import type { Workspace } from '../core/workspace.js';
 import type { Engine } from '../engine.js';
+import { stepLines } from '../observability/session-report.js';
 import type { EvalCase, EvalCheck } from './cases.js';
-import { formatTable, shortCount } from './format.js';
+import { average, formatTable, shortCount } from './format.js';
 
 export interface CheckResult {
   check: string;
@@ -27,6 +29,11 @@ export interface TrialResult {
   turns: number;
   durationMs: number;
   answer: string;
+  /**
+   * What happened, a line per step: tool calls with their failures, what heaw told the agent,
+   * what the agent said. Why a trial failed is usually in here, not in the checks.
+   */
+  steps?: string[];
   /** Kept for inspection with `keep`. */
   dir?: string;
 }
@@ -41,6 +48,8 @@ export interface CaseResult {
 export interface EvalReport {
   startedAt: string;
   model: string;
+  /** The model that graded `judge` checks: reports compare fairly only with the same judge. */
+  judgeModel?: string;
   cases: CaseResult[];
   passed: number;
   total: number;
@@ -105,6 +114,7 @@ export async function runEvals(cases: EvalCase[], options: RunEvalsOptions): Pro
   return {
     startedAt: new Date(started).toISOString(),
     model: options.model,
+    judgeModel: options.judge.id,
     cases: results,
     passed: results.reduce((sum, item) => sum + item.passed, 0),
     total: results.reduce((sum, item) => sum + item.trials.length, 0),
@@ -159,15 +169,25 @@ async function runTrial(
     const engine = await options.createEngine(workspace, evalCase);
     const session = engine.session();
     let end: { stopReason: StopReason; usage: Usage; turns: number; costUsd?: number } | undefined;
+    // The run as a session log would hold it, for the trial's steps.
+    const records: SessionRecord[] = [];
     try {
       for await (const event of session.send(evalCase.prompt)) {
         if (event.type === 'run.end' && event.agentId === session.agentId) end = event;
+        if (event.type === 'text.delta' || event.type === 'reasoning.delta') continue;
+        if (event.type !== 'message.complete') records.push({ type: 'event', event });
+        else if (event.agentId === session.agentId) {
+          records.push({ type: 'message', timestamp: event.timestamp, message: event.message });
+        }
       }
     } finally {
       await engine.dispose();
     }
     const answer = lastAnswer(session.messages);
     const stopReason = end?.stopReason ?? 'error';
+    const turns = end?.turns ?? 0;
+    // Taken before the checks run: what they add (hidden tests, build output) is not the agent's.
+    const changes = await agentChanges(dir);
 
     const checks: CheckResult[] = [];
     for (const check of evalCase.checks) {
@@ -175,6 +195,8 @@ async function runTrial(
         dir,
         workspace,
         answer,
+        turns,
+        changes,
         evalCase,
         judge: options.judge,
       });
@@ -193,9 +215,10 @@ async function runTrial(
         checks,
         usage: end?.usage ?? emptyUsage(),
         ...(end?.costUsd !== undefined && { costUsd: end.costUsd }),
-        turns: end?.turns ?? 0,
+        turns,
         durationMs: Date.now() - started,
         answer,
+        steps: stepLines(records) ?? [],
         ...(options.keep && { dir }),
       },
       usage: end?.usage ?? emptyUsage(),
@@ -220,12 +243,40 @@ async function runCheck(
     dir: string;
     workspace: Workspace;
     answer: string;
+    turns: number;
+    /** The agent's changes as a diff. */
+    changes: string;
     evalCase: EvalCase;
     judge: ModelClient;
   },
 ): Promise<{ result: CheckResult; usage: Usage }> {
   const none = emptyUsage();
+  if ('maxTurns' in check) {
+    const passed = trial.turns <= check.maxTurns;
+    return {
+      result: {
+        check: `at most ${check.maxTurns} turns`,
+        passed,
+        ...(!passed && { detail: `took ${trial.turns}` }),
+      },
+      usage: none,
+    };
+  }
   if ('command' in check) {
+    if (check.files) {
+      try {
+        await cp(check.files, trial.dir, { recursive: true, force: true });
+      } catch (error) {
+        return {
+          result: {
+            check: `${check.command} exits ${check.expectExitCode}`,
+            passed: false,
+            detail: `could not copy the check's files (${check.files}): ${(error as Error).message}`,
+          },
+          usage: none,
+        };
+      }
+    }
     const run = await trial.workspace.exec(check.command, { timeoutMs: 10 * 60_000 });
     const passed = run.exitCode === check.expectExitCode;
     return {
@@ -233,7 +284,7 @@ async function runCheck(
         check: `${check.command} exits ${check.expectExitCode}`,
         passed,
         ...(!passed && {
-          detail: `exited ${run.exitCode ?? '(stopped)'}${run.timedOut ? ' (timed out)' : ''}: ${tail(run.output)}`,
+          detail: `exited ${run.exitCode ?? '(stopped)'}${run.timedOut ? ' (timed out)' : ''}: ${failureOf(run.output)}`,
         }),
       },
       usage: none,
@@ -271,22 +322,23 @@ const JUDGE_SYSTEM =
   'final answer and the changes it made. Judge only the criterion, strictly but fairly. Answer ' +
   'with JSON only: {"pass": true or false, "reason": "one sentence"}.';
 
+/** What the agent changed in the trial folder, as a diff against the fixture. */
+async function agentChanges(dir: string): Promise<string> {
+  await git(dir, ['add', '-A']);
+  const diff = (await git(dir, ['diff', '--cached', '--stat', '--patch'])) ?? '';
+  if (!diff.trim()) return '(no changes)';
+  return diff.length > MAX_DIFF_CHARS ? `${diff.slice(0, MAX_DIFF_CHARS)}\n[diff cut]` : diff;
+}
+
 async function judge(
   criterion: string,
-  trial: { dir: string; answer: string; evalCase: EvalCase; judge: ModelClient },
+  trial: { answer: string; changes: string; evalCase: EvalCase; judge: ModelClient },
 ): Promise<{ result: CheckResult; usage: Usage }> {
-  await git(trial.dir, ['add', '-A']);
-  const diff = (await git(trial.dir, ['diff', '--cached', '--stat', '--patch'])) ?? '';
-  const changes = diff.trim()
-    ? diff.length > MAX_DIFF_CHARS
-      ? `${diff.slice(0, MAX_DIFF_CHARS)}\n[diff cut]`
-      : diff
-    : '(no changes)';
   const prompt = [
     `Task given to the agent:\n${trial.evalCase.prompt}`,
     `Criterion:\n${criterion}`,
     `The agent's final answer:\n${trial.answer || '(none)'}`,
-    `Changes it made (git diff):\n${changes}`,
+    `Changes it made (git diff):\n${trial.changes}`,
   ].join('\n\n');
   for await (const event of trial.judge.stream({
     system: JUDGE_SYSTEM,
@@ -344,15 +396,17 @@ export function formatEvalReport(report: EvalReport): string {
       ? '—'
       : `$${(costs.reduce<number>((sum, value) => sum + (value ?? 0), 0) / trials).toFixed(4)}`;
     const time = item.trials.reduce((sum, trial) => sum + trial.durationMs, 0) / trials;
+    const turns = item.trials.reduce((sum, trial) => sum + trial.turns, 0) / trials;
     return [
       item.name,
       `${item.passed}/${item.trials.length}`,
+      average(turns),
       shortCount(tokens / trials),
       cost,
       `${(time / 1000).toFixed(1)}s`,
     ];
   });
-  const header = ['case', 'passed', 'tokens/trial', 'cost/trial', 'time/trial'];
+  const header = ['case', 'passed', 'turns/trial', 'tokens/trial', 'cost/trial', 'time/trial'];
   const failures = report.cases.flatMap((item) =>
     item.trials
       .filter((trial) => !trial.passed)
@@ -431,6 +485,26 @@ function git(cwd: string, args: string[]): Promise<string | undefined> {
 function tail(output: string): string {
   const text = output.trim();
   return text.length > 300 ? `…${text.slice(-300)}` : text || '(no output)';
+}
+
+/**
+ * Why a command failed: the lines that name the failure (a failing test, an assertion with what
+ * it expected and got, an error), else the end of the output. The end of a test runner's output
+ * is often a stack trace that says nothing.
+ */
+function failureOf(output: string): string {
+  const telling = output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) =>
+      /^(not ok|✖|×|FAIL\b)|AssertionError|^Error\b|\b\w*Error:|^(expected|actual|message)\b|^[+-] /i.test(
+        line,
+      ),
+    )
+    .filter((line) => !/^✖ failing tests:?$/.test(line));
+  if (!telling.length) return tail(output);
+  const text = [...new Set(telling)].join(' | ');
+  return text.length > 600 ? `${text.slice(0, 600)}…` : text;
 }
 
 function slug(name: string): string {

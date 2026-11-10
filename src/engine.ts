@@ -316,17 +316,35 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const credentials = options.mcp?.credentialsDir
     ? new McpCredentialStore(options.mcp.credentialsDir)
     : undefined;
-  const mcp = manageMcp
-    ? new McpManager({
-        env,
-        cwd: workspace.root,
-        clientInfo: { name: 'heaw', version: VERSION },
-        ...(credentials && {
-          authProvider: (entry: McpServerEntry, url: URL) =>
-            new McpOAuthProvider(credentials, url.href, oauthSettingsOf(entry, env)),
-        }),
-      })
-    : undefined;
+  const newMcpManager = () =>
+    new McpManager({
+      env,
+      cwd: workspace.root,
+      clientInfo: { name: 'heaw', version: VERSION },
+      ...(credentials && {
+        authProvider: (entry: McpServerEntry, url: URL) =>
+          new McpOAuthProvider(credentials, url.href, oauthSettingsOf(entry, env)),
+      }),
+    });
+  const mcp = manageMcp ? newMcpManager() : undefined;
+  // MCP servers of agent files, by agent: started when the agent first runs, so their tools (a
+  // browser's two dozen) cost the other agents nothing, and kept for its next run.
+  const agentServers = new Map<string, McpManager>();
+  const ownServers = async (
+    definition: AgentDefinition | undefined,
+  ): Promise<McpManager | undefined> => {
+    if (!definition?.mcpServers?.length) return undefined;
+    let servers = agentServers.get(definition.name);
+    if (!servers) {
+      servers = newMcpManager();
+      agentServers.set(definition.name, servers);
+      await servers.load(definition.mcpServers);
+    }
+    // Longer than for the project's servers: the agent is there for these tools, and the first
+    // start may download the server (npx).
+    await servers.ready(AGENT_MCP_WAIT_MS);
+    return servers;
+  };
   if (mcp && options.mcp) void mcp.load(options.mcp.servers);
   const reloadMcp = async (): Promise<string> => {
     if (!mcp || !options.mcp?.reload) return 'MCP servers cannot be reloaded in this setup.';
@@ -445,7 +463,20 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       }),
       ...(git && { git: formatGitSummary(git) }),
     });
-  const mcpSection = () => formatMcpInstructions(mcp?.instructions() ?? []);
+  const mcpSection = (own?: McpManager) =>
+    [
+      formatMcpInstructions([...(mcp?.instructions() ?? []), ...(own?.instructions() ?? [])]),
+      // Without this the agent would only miss the tools, and guess why.
+      ...(own?.statuses() ?? [])
+        .filter((server) => server.status !== 'connected')
+        .map(
+          (server) =>
+            `The MCP server "${server.name}" of your agent file is ${server.status}` +
+            `${server.error ? `: ${server.error}` : ''}. Its tools are missing; say so in your report.`,
+        ),
+    ]
+      .filter(Boolean)
+      .join('\n\n') || undefined;
 
   /** The user's agent, or a named agent run with `runAgent`. */
   const newSession = (setup: SessionSetup = {}) => {
@@ -468,20 +499,26 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       ...(definition ? [definition.prompt] : []),
     ];
     const wanted = definition?.tools;
+    const { own } = setup;
     const policy = new PermissionPolicy(setup.permissions ?? options.permissions);
+    const restriction = {
+      ...(definition?.mode && { mode: definition.mode }),
+      ...(own && { own: ownedBy(own) }),
+    };
+    const listed = wanted
+      ? () => currentTools().filter((tool) => wanted.includes(tool.name))
+      : currentTools;
     return new Session({
       model: setup.model ?? model,
       // Read before each turn: MCP servers can connect or reload while a session goes on.
       system: () =>
-        [...header, memorySection(canRemember(wanted)), mcpSection(), environment, skillsIndex]
+        [...header, memorySection(canRemember(wanted)), mcpSection(own), environment, skillsIndex]
           .filter(Boolean)
           .join('\n\n'),
       workspace,
-      tools: wanted
-        ? () => currentTools().filter((tool) => wanted.includes(tool.name))
-        : currentTools,
+      tools: own ? () => withOwnTools(listed(), own) : listed,
       ...(mcp && { beforeRun: () => mcp.ready(MCP_STARTUP_WAIT_MS) }),
-      permissions: definition?.mode ? policy.restricted({ mode: definition.mode }) : policy,
+      permissions: Object.keys(restriction).length ? policy.restricted(restriction) : policy,
       interactive,
       limits: { ...options.limits, ...definition?.limits },
       // An agent a hook started runs only tool hooks, and cannot start more this way.
@@ -510,7 +547,8 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     const childModel = await modelFor(spec.definition, spec.parent.model);
     const effort = spec.definition?.reasoningEffort ?? options.reasoningEffort;
     const environment = environmentBlock();
-    const usesMcp = spec.tools.some((tool) => tool.name.startsWith('mcp__'));
+    const own = await ownServers(spec.definition);
+    const usesMcp = !!own || spec.tools.some((tool) => tool.name.startsWith('mcp__'));
     const usesSkills = spec.tools.some((tool) => tool.name === 'load_skill');
     // What all sub-agents share comes first and their own role last: providers cache the start
     // of a prompt, so parallel sub-agents reuse each other's cached start.
@@ -529,15 +567,15 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
           ...shared,
           environment,
           memorySection(spec.tools.some((tool) => tool.name === 'remember')),
-          usesMcp ? mcpSection() : undefined,
+          usesMcp ? mcpSection(own) : undefined,
           usesSkills ? skillsIndex : undefined,
           role,
         ]
           .filter(Boolean)
           .join('\n\n'),
       workspace,
-      tools: spec.tools,
-      permissions: spec.permissions,
+      tools: own ? () => withOwnTools(spec.tools, own) : spec.tools,
+      permissions: own ? spec.permissions.restricted({ own: ownedBy(own) }) : spec.permissions,
       interactive: spec.parent.interactive,
       requestApproval: spec.parent.requestApproval,
       limits: spec.limits,
@@ -568,6 +606,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     }
     const session = newSession({
       definition,
+      own: await ownServers(definition),
       ...(definition?.model &&
         definition.model !== 'inherit' && { model: await createModel(definition.model) }),
       interactive: false,
@@ -666,7 +705,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
     },
     async dispose() {
       await tracer?.shutdown();
-      await mcp?.dispose();
+      await Promise.all([mcp?.dispose(), ...[...agentServers.values()].map((s) => s.dispose())]);
       if (ownsWorkspace) await workspace.dispose();
     },
   };
@@ -681,8 +720,22 @@ interface SessionSetup {
   interactive?: boolean;
   /** Started by a hook's `runAgent`. */
   forHook?: boolean;
+  /** The MCP servers of the agent's own file, started. */
+  own?: McpManager | undefined;
   /** Overrides the engine's intent, e.g. a resumed session's own. */
   intent?: string;
+}
+
+/** An agent's tools with those of its own MCP servers, which win over a project server's of the same name. */
+function withOwnTools(tools: Tool[], own: McpManager): Tool[] {
+  const owned = own.tools();
+  const names = new Set(owned.map((tool) => tool.name));
+  return [...tools.filter((tool) => !names.has(tool.name)), ...owned];
+}
+
+/** Whether a tool comes from the agent's own MCP servers, for its permissions. */
+function ownedBy(own: McpManager): (toolName: string) => boolean {
+  return (toolName) => own.tools().some((tool) => tool.name === toolName);
 }
 
 const TODO_MARKS = { pending: '[ ]', in_progress: '[>]', completed: '[x]' } as const;
@@ -705,6 +758,7 @@ function latestTodoList(messages: readonly Message[]): string | undefined {
 /** How long a run waits for MCP servers to connect; slower ones join later. */
 const MCP_STARTUP_WAIT_MS = 30_000;
 const MCP_RELOAD_WAIT_MS = 60_000;
+const AGENT_MCP_WAIT_MS = 120_000;
 
 function describeMcpReload(
   summary: { started: string[]; stopped: string[] },

@@ -31,6 +31,8 @@ export default defineConfig({ /* settings below */ });
 
 **Providers.** Built in: `azure`, `openai`, `anthropic`, `google`, `ollama`. Fields: `type`, `apiKey`, `baseURL`, `endpoint` / `resourceName` (Azure), `api: 'responses' | 'chat'` (Azure), `headers`. Any OpenAI-compatible server: `{ type: 'openai-compatible', baseURL: 'http://localhost:1234/v1' }`.
 
+**Local models.** Pick one that calls tools, such as `ollama:qwen3-coder:30b`, and give it an entry in `models`: `contextWindow`, and `pricing: { input: 0, output: 0 }` when a cost limit is set. Ollama serves 4,096 tokens of context by default, too little for the agent's instructions and tools: the model then writes tool calls as text. Set `OLLAMA_CONTEXT_LENGTH` (e.g. `32768`) in the environment Ollama starts in, and restart it. A model that cannot reason gets no reasoning effort after its first refusal, and a response the server cuts off is asked for again. On a desktop GPU a 30B model takes about a minute per turn: good for questions about the code, slow for building (heaw's eval comparison: [evals/README.md](../evals/README.md)).
+
 **Docker workspace.** `{ type: 'docker', image: 'node:24', network: 'none' | 'bridge', cpus, memory, env: { NAME: env('NAME') }, git: { tokenEnv, username }, command: 'docker' | 'podman' }`. Only `env` reaches the container; `git.tokenEnv` enables HTTPS `git push`.
 
 ## Environment variables
@@ -84,9 +86,15 @@ mode: read-only                 # stricter than the caller, never looser; allow 
 model: anthropic:claude-sonnet-4-5  # or inherit (the caller's); default: subagents.model, else the caller's
 reasoningEffort: high           # low | medium | high; default: the config's
 maxTurns: 30                    # also maxTokens, maxCostUsd, maxMinutes
+mcpServers:                     # its own, as in .mcp.json: started on its first run, for it only
+  browser:
+    command: npx
+    args: ["-y", "@playwright/mcp@0.0.83", "--headless", "--isolated", "--browser", "msedge"]
 ---
 You are a careful reviewer. …
 ```
+
+An agent's own MCP servers give it their tools besides `tools`, allowed for it without asking (a deny rule still applies); the other agents never see them, so two dozen browser tools cost the main agent nothing. `/setup` offers such a `tester` for web apps: it starts the app, uses the changed pages in a browser and ends with "Verdict: works", "fix first" or "could not test"; the `beforeStop` hook runs it after interface changes, and plan steps that change the interface are checked with it.
 
 Agents: `.heaw/agents/<name>.md` (Claude Code agent files work). The agent gives each sub-agent its `files` (its other writes are denied) and a `check` it must pass before it reports. Sub-agents started together share what the run's budget has left, and near 80% of a limit (turns, tokens, cost or time) the agent is asked to wrap up. Skills: `<name>/SKILL.md` with `name` and `description` in `.heaw/skills/`, `.agents/skills/` or `.claude/skills/`; personal ones in `~/.heaw/`. Built in: `setup-harness` (`/setup`), `plan-work` (`/plan`) and `retro` (`/retro [session]`: the agent reviews a session with its `session_report` tool and proposes lasting fixes).
 

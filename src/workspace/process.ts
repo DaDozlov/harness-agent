@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 /**
  * Stops a command and everything it started. Killing only the shell would leave its children
@@ -31,11 +32,35 @@ export function killTree(child: ChildProcess): Promise<void> {
       child.kill(signal);
     }
   };
-  signalGroup('SIGTERM');
-  setTimeout(() => {
-    if (child.exitCode === null && child.signalCode === null) signalGroup('SIGKILL');
-  }, 2_000).unref();
-  return Promise.resolve();
+  // Waits for the whole group, not the shell: the shell ends at once on SIGTERM while what it
+  // started is still shutting down, or ignores SIGTERM. A SIGKILL left to a timer would never
+  // be sent if heaw exited first, and was skipped once the shell had ended.
+  return (async () => {
+    signalGroup('SIGTERM');
+    if (await groupGone(pid, STOP_GRACE_MS)) return;
+    signalGroup('SIGKILL');
+    await groupGone(pid, KILL_WAIT_MS);
+  })();
+}
+
+/** How long a stopped command may take to end on SIGTERM before its group is killed. */
+const STOP_GRACE_MS = 2_000;
+/** How long to wait for a killed group to be gone. */
+const KILL_WAIT_MS = 1_000;
+
+/** Whether no process of the group is left, checked until `ms` have passed. */
+async function groupGone(group: number, ms: number): Promise<boolean> {
+  const until = Date.now() + ms;
+  for (;;) {
+    try {
+      process.kill(-group, 0);
+    } catch (error) {
+      // ESRCH: none left. EPERM: one is left that we may not signal.
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return true;
+    }
+    if (Date.now() >= until) return false;
+    await sleep(25);
+  }
 }
 
 /** Longest a sweep for leftover processes may take, so stopping never hangs on it. */

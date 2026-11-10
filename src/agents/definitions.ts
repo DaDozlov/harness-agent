@@ -3,6 +3,7 @@ import { basename, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import type { RunLimits } from '../core/loop.js';
 import { PERMISSION_MODES, type PermissionMode } from '../core/permissions.js';
+import { type McpServerEntry, validateServer } from '../mcp/config.js';
 
 /**
  * A named agent (docs/DESIGN.md §4.7), defined in `.heaw/agents/<name>.md` (project) or
@@ -26,6 +27,11 @@ export interface AgentDefinition {
   /** How hard it thinks, for models that reason, e.g. `high` for a reviewer. Default: the config's. */
   reasoningEffort?: ReasoningEffort;
   limits?: Partial<RunLimits>;
+  /**
+   * MCP servers only this agent uses, such as a browser for a tester: started when it first runs,
+   * their tools given to it besides `tools`, and allowed for it unless a deny rule says otherwise.
+   */
+  mcpServers?: McpServerEntry[];
   /** The file it came from. */
   source: string;
 }
@@ -133,6 +139,7 @@ export function parseAgentDefinition(
   }
 
   const tools = toolList(data['tools']);
+  const mcpServers = serverList(data['mcpServers'], source);
   const prompt = body.trim();
   return {
     definition: {
@@ -144,10 +151,25 @@ export function parseAgentDefinition(
       ...(mode && { mode: mode as PermissionMode }),
       ...(effort && { reasoningEffort: effort as ReasoningEffort }),
       ...(Object.keys(limits).length && { limits }),
+      ...(mcpServers?.length && { mcpServers }),
       source,
     },
     notes,
   };
+}
+
+/** `mcpServers:` in the shape of `.mcp.json`: a map from a server's name to its settings. */
+function serverList(value: unknown, source: string): McpServerEntry[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('mcpServers must map server names to their settings, as in .mcp.json');
+  }
+  return Object.entries(value as Record<string, unknown>).map(([name, config]) => {
+    if (!NAME.test(name)) {
+      throw new Error(`the MCP server name "${name}" may only use letters, digits, - and _`);
+    }
+    return { name, config: validateServer(config, `mcpServers.${name}`), source };
+  });
 }
 
 /** `[read_file, grep]`, `read_file, grep` or Claude Code names such as `Read, Grep`. */

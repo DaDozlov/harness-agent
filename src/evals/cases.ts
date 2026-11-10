@@ -7,10 +7,20 @@ import { PERMISSION_MODES, type PermissionMode } from '../core/permissions.js';
 
 /** One way to tell whether a trial succeeded. */
 export type EvalCheck =
-  | { command: string; expectExitCode: number }
+  | {
+      command: string;
+      expectExitCode: number;
+      /**
+       * A folder copied into the workspace before the command runs, replacing files of the same
+       * name: tests the agent never saw, or the originals of files it must not weaken.
+       */
+      files?: string;
+    }
   | { judge: string }
   | { answerContains: string }
-  | { file: string; exists: boolean; contains?: string };
+  | { file: string; exists: boolean; contains?: string }
+  /** The run took at most this many model turns: what a task should cost, not only its result. */
+  | { maxTurns: number };
 
 /** An eval case (docs/DESIGN.md §4.16), from `evals/<name>.yaml`. */
 export interface EvalCase {
@@ -64,7 +74,11 @@ const caseSchema = z
         .array(
           z.union([
             z
-              .object({ command: z.string().min(1), expectExitCode: z.number().int().default(0) })
+              .object({
+                command: z.string().min(1),
+                expectExitCode: z.number().int().default(0),
+                files: z.string().min(1).optional(),
+              })
               .strict(),
             z.object({ judge: z.string().min(1) }).strict(),
             z.object({ answerContains: z.string().min(1) }).strict(),
@@ -75,6 +89,7 @@ const caseSchema = z
                 contains: z.string().optional(),
               })
               .strict(),
+            z.object({ maxTurns: z.number().int().positive() }).strict(),
           ]),
         )
         .min(1, 'add at least one check, or nothing can fail'),
@@ -137,6 +152,11 @@ export function parseEvalCase(text: string, source: string): EvalCase {
     ...(data.mode && { mode: data.mode }),
     allow: data.allow,
     limits: data.limits,
-    checks: data.checks,
+    // Like the fixture, a check's files are named relative to the case file.
+    checks: data.checks.map((check) =>
+      'command' in check && check.files
+        ? { ...check, files: resolve(dirname(source), check.files) }
+        : check,
+    ),
   };
 }

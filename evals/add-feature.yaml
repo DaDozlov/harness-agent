@@ -1,0 +1,19 @@
+description: >-
+  A small feature with a precise contract and tests, following the fixture's conventions
+  (RangeError for bad input, tests for the failing cases too).
+fixture: ./fixtures/duration
+prompt: >-
+  Add parseDuration(text) to src/duration.js, the reverse of formatDuration(): "1h 30m" gives
+  5400000. It accepts what formatDuration() writes: the units d, h, m and s, each at most once,
+  largest first, with whole numbers, separated by single spaces. Anything else throws a
+  RangeError. Add tests.
+limits:
+  maxTurns: 20
+  maxCostUsd: 0.5
+checks:
+  - command: npm test
+  - command: node --test acceptance/duration.test.js
+    files: ./checks/add-feature
+  - judge: >-
+      test/ has new tests for parseDuration() that cover at least one text it accepts and at
+      least one text that must throw.

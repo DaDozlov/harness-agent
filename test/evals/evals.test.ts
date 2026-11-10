@@ -182,9 +182,95 @@ describe('running evals', () => {
     expect(seenDiffs[0]).toContain('+export const add = (a, b) => a + b;');
     expect(seenDiffs[1]).toContain('Changes it made (git diff):\n(no changes)');
     expect(report.judgeUsage.inputTokens).toBe(100);
+    expect(report.judgeModel).toBe(judge.id);
+    // 3 turns, then 2: the table shows the mean.
     expect(formatEvalReport(report)).toMatch(
-      /case\s+passed\s+tokens\/trial\s+cost\/trial\s+time\/trial\nfix-add\s+1\/2\s+/,
+      /case\s+passed\s+turns\/trial\s+tokens\/trial\s+cost\/trial\s+time\/trial\nfix-add\s+1\/2\s+2\.5\s+/,
     );
+    // What happened in a trial is kept with it: a failed one can be understood from the report.
+    expect(first?.steps).toEqual([
+      expect.stringMatching(/the user: "The add function is wrong\. Fix it\."$/) as unknown,
+      '[main t1] read_file math.js',
+      '[main t2] write_file math.js',
+      '[main] says: Fixed: add now returns a + b.',
+      expect.stringMatching(/run ended: end_turn · 3 turns/) as unknown,
+    ]);
+  });
+
+  it('copies hidden check files in before a command, and can limit the turns', async () => {
+    const root = await evalProject('');
+    await mkdir(join(root, 'evals', 'checks'), { recursive: true });
+    await writeFile(
+      join(root, 'evals', 'checks', 'accept.mjs'),
+      "import { add } from './math.js';\nprocess.exit(add(2, 3) === 5 ? 0 : 1);\n",
+    );
+    // A failing test: the detail names the assertion, not the stack trace at the end.
+    await writeFile(
+      join(root, 'evals', 'checks', 'strict.test.mjs'),
+      [
+        "import assert from 'node:assert/strict';",
+        "import { test } from 'node:test';",
+        "import { add } from './math.js';",
+        "test('adds big numbers', () => assert.equal(add(2, 3), 6));",
+      ].join('\n'),
+    );
+    const evalCase = parseEvalCase(
+      [
+        'prompt: The add function is wrong. Fix it.',
+        'fixture: ./fixtures/math',
+        'checks:',
+        '  - command: node accept.mjs',
+        '    files: ./checks',
+        '  - command: node --test strict.test.mjs',
+        '  - judge: Only math.js changed.',
+        '  - maxTurns: 2',
+      ].join('\n'),
+      join(root, 'evals', 'fix-add.yaml'),
+    );
+    expect(evalCase.checks[0]).toEqual({
+      command: 'node accept.mjs',
+      expectExitCode: 0,
+      files: resolve(root, 'evals', 'checks'),
+    });
+    const prompts: string[] = [];
+    const judge = new ScriptedModelClient([{ text: '{"pass": true}' }]);
+
+    const report = await runEvals([evalCase], {
+      model: 'scripted:test',
+      judge: {
+        id: judge.id,
+        capabilities: judge.capabilities,
+        stream: (request, signal) => {
+          prompts.push((request.messages[0]?.content[0] as { text: string }).text);
+          return judge.stream(request, signal);
+        },
+      },
+      createWorkspace: (dir) => new LocalWorkspace(dir),
+      createEngine: (workspace) =>
+        createEngine({
+          model: new ScriptedModelClient(FIX),
+          workspace,
+          toolsets: ['fs'],
+          interactive: false,
+          permissions: { mode: 'accept-edits' },
+          git: false,
+        }),
+    });
+
+    const [trial] = report.cases[0]!.trials;
+    expect(trial?.checks).toEqual([
+      { check: 'node accept.mjs exits 0', passed: true },
+      {
+        check: 'node --test strict.test.mjs exits 0',
+        passed: false,
+        detail: expect.stringMatching(/^exited 1: .*adds big numbers.*AssertionError/) as unknown,
+      },
+      { check: 'judge: Only math.js changed.', passed: true },
+      { check: 'at most 2 turns', passed: false, detail: 'took 3' },
+    ]);
+    // The judge sees what the agent changed, not the files a check brought along.
+    expect(prompts[0]).toContain('+export const add = (a, b) => a + b;');
+    expect(prompts[0]).not.toContain('accept.mjs');
   });
 
   it("heaw eval runs the project's cases, prints a table, saves a report and fails when a trial fails", async () => {
@@ -201,6 +287,7 @@ describe('running evals', () => {
     const stdout = output();
     const stderr = output();
     const scripts = [[], FIX];
+    const tools: string[][] = [];
 
     const code = await evalCommand(
       undefined,
@@ -211,13 +298,15 @@ describe('running evals', () => {
         stdout,
         stderr,
         packageEntry: resolve('src/index.ts'),
-        createEngine: (options) =>
-          createEngine({
+        createEngine: (options) => {
+          tools.push((options.tools ?? []).map((tool) => tool.name));
+          return createEngine({
             ...options,
             // The scripted fix runs no command; the reminder to verify would ask for one.
             verifyChanges: false,
             model: new ScriptedModelClient(scripts.shift() ?? [], { id: 'scripted:test' }),
-          }),
+          });
+        },
       },
     );
 
@@ -225,11 +314,15 @@ describe('running evals', () => {
     expect(stderr.text).toContain('fix-add #1/1: passed');
     expect(stdout.text).toMatch(/fix-add\s+1\/1/);
     expect(stdout.text).toContain('1/1 trials passed · scripted:test');
+    // A trial works in its own folder: the tools that look at this project are left out.
+    expect(tools.at(-1)).toEqual([]);
     const reportPath = /Report: (.+)\n/.exec(stdout.text)?.[1];
     const report = JSON.parse(await readFile(resolve(root, reportPath!), 'utf8')) as {
       passed: number;
+      cases: Array<{ trials: Array<{ steps: string[] }> }>;
     };
     expect(report.passed).toBe(1);
+    expect(report.cases[0]?.trials[0]?.steps).toContain('[main t2] write_file math.js');
     expect(await readFile(join(root, '.heaw', 'evals', '.gitignore'), 'utf8')).toBe('*\n');
     // The fixture itself is untouched: each trial works on a copy.
     expect(await readFile(join(root, 'evals', 'fixtures', 'math', 'math.js'), 'utf8')).toContain(

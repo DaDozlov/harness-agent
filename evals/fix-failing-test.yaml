@@ -1,0 +1,15 @@
+description: >-
+  A failing test whose cause is one module away from where it shows: total() is wrong because
+  toCents() rounds down. The fix belongs in the helper, not in the test or in the caller.
+fixture: ./fixtures/cart
+prompt: The test suite fails. Find the cause and fix it.
+limits:
+  maxTurns: 20
+  maxCostUsd: 0.5
+checks:
+  - command: npm test
+  # Prices the visible test does not use: a fix in the wrong place, or to that one value, fails.
+  - command: node --test acceptance/cart.test.js
+    files: ./checks/fix-failing-test
+  # The test it was given is unchanged.
+  - command: git diff --quiet HEAD -- test/cart.test.js

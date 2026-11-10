@@ -293,6 +293,19 @@ describe('comparing eval reports', () => {
     expect(text).toContain('2/3 → 3/3');
     expect(text).toContain('40.0k → 20.0k');
     expect(text).toContain('Worse: add');
+    // Also turns and time, which is what differs between a hosted and a local model.
+    expect(text).toMatch(
+      /case\s+passed\s+turns\/trial\s+tokens\/trial\s+cost\/trial\s+time\/trial\s+change\n/,
+    );
+    expect(text).toMatch(
+      /fix\s+2\/3 → 3\/3\s+3 → 3\s+40\.0k → 20\.0k\s+\S+ → \S+\s+1s → 1s\s+better/,
+    );
+    expect(text).toContain('before: 0/0 passed · azure:a');
+    expect(text).not.toContain('Judged by different models');
+    expect(
+      compareReports({ ...before, judgeModel: 'azure:a' }, { ...after, judgeModel: 'ollama:b' })
+        .text,
+    ).toContain('Judged by different models (azure:a, then ollama:b)');
 
     const dir = await tempDir();
     const { writeFile } = await import('node:fs/promises');

@@ -467,11 +467,11 @@ export class Session {
       this.#reminded = false;
       this.#nudgedAt = undefined;
       this.#tools.loops?.reset();
+      if (first) await this.#tellOpenPlan();
       this.#stepsAtStart = this.#building ? await this.#planProgress() : 0;
       // Changes the user made to the plan between runs are theirs to make.
       if (this.#building) this.#approvedSteps = this.#readSteps();
       this.#droppedTold.clear();
-      if (first) await this.#tellOpenPlan();
       const notes = this.#notes.splice(0).map(
         (note) => `[${note}]
 
@@ -802,6 +802,10 @@ export class Session {
     const steps = await readPlanSteps(this.#workspace).catch(() => undefined);
     if (!steps?.open.length) return;
     const open = steps.open.length;
+    // The plan was approved in an earlier conversation: a run that goes on with it is sent back
+    // to the next step like one in the conversation that approved it (#planReminder). A run
+    // about something else ticks no step, and is left alone.
+    this.#building = true;
     this.#notes.push(
       `${PLAN_FILE} has ${open} open step${open === 1 ? '' : 's'} of ${steps.all.length}; the next ` +
         `is: ${steps.open[0]} If this message continues that work, read ${PLAN_FILE} first, go ` +

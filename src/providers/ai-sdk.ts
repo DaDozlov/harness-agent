@@ -1,5 +1,6 @@
 import {
   APICallError,
+  InvalidResponseDataError,
   type LanguageModelV4,
   type LanguageModelV4CallOptions,
   type LanguageModelV4FinishReason,
@@ -413,8 +414,22 @@ export function toModelError(error: unknown): ModelError {
       cause: error,
     });
   }
-  return new ModelError(describe(error), { retryable: false, cause: error });
+  return new ModelError(describe(error), { retryable: cutOff(error), cause: error });
 }
+
+/**
+ * The response stopped half way: the server or the connection dropped it (a local model server
+ * that ran out of memory, a proxy that timed out). Asking again usually works.
+ */
+function cutOff(error: unknown): boolean {
+  if (InvalidResponseDataError.isInstance(error)) return /stream ended/i.test(error.message);
+  if (!(error instanceof Error)) return false;
+  if (error.name === 'TypeError' && error.message === 'terminated') return true;
+  const code = (error.cause as { code?: unknown } | undefined)?.code;
+  return typeof code === 'string' && DROPPED_CONNECTION.has(code);
+}
+
+const DROPPED_CONNECTION = new Set(['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET']);
 
 function retryAfter(headers: Record<string, string> | undefined): number | undefined {
   if (!headers) return undefined;

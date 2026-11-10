@@ -118,7 +118,11 @@ export async function evalCommand(
   const graded = judgeCost(report, judge);
   context.stdout.write(`${formatEvalReport(report)}\n`);
   if (graded) context.stdout.write(`Judging cost $${graded.toFixed(4)} (${judge.id}).\n`);
-  context.stdout.write(`Report: ${relative(context.cwd, saved) || saved}\n`);
+  const failed = report.passed < report.total;
+  context.stdout.write(
+    `Report: ${relative(context.cwd, saved) || saved}` +
+      `${failed ? ' (with the steps and answer of each trial, to see why one failed)' : ''}\n`,
+  );
   if (comparison && baseline) {
     const from = relative(context.cwd, baseline.file) || baseline.file;
     context.stdout.write(`\nCompared with ${from}:\n${comparison.text}\n`);
@@ -185,6 +189,9 @@ async function readReport(file: string): Promise<EvalReport> {
   return parsed as EvalReport;
 }
 
+/** Tools `loadProject` adds that inspect the project heaw runs in, which is not the trial's. */
+const PROJECT_TOOLS = new Set(['check_config', 'session_report']);
+
 /** The project's engine settings, confined to one trial's folder. */
 async function trialOptions(
   base: EngineOptions,
@@ -200,6 +207,8 @@ async function trialOptions(
     sessionStore: undefined,
     // MCP servers act on the outside world; trials stay in their folder.
     mcp: undefined,
+    // Nor do trials get the tools that look at this project's own setup and sessions.
+    ...(base.tools && { tools: base.tools.filter((tool) => !PROJECT_TOOLS.has(tool.name)) }),
     instructions: await loadInstructions({ projectRoot: workspace.root, heawHome: heawHome(env) }),
     permissions: {
       ...base.permissions,

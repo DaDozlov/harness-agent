@@ -1,0 +1,26 @@
+description: >-
+  Plan mode from start to end: the agent switches to it, writes PLAN.md with the plan-work
+  skill, gets it approved (in advance, by the `allow` below) and builds every step, ticking each.
+  From builds where the agent stopped after single steps, or asked for approval of a plan it had
+  not written.
+fixture: ./fixtures/inventory
+prompt: >-
+  Plan this before you build it, then build it: the inventory needs CSV export and import.
+  toCsv(items) gives text with the header row sku,name,quantity and one row per item;
+  fromCsv(text) reads such text back into items, with the quantity as a number, and throws a
+  RangeError for a row with the wrong number of fields or a quantity that is not a whole number.
+  Names can contain commas and double quotes, so a field is quoted when it needs to be, with its
+  quotes doubled. Both functions go into a new module src/csv.js, with tests. Nobody can answer
+  questions during this run: decide open points yourself and note them in the plan.
+# The approval of the plan, which nobody is there to give.
+allow:
+  - finish_plan
+limits:
+  maxTurns: 45
+  maxCostUsd: 1.5
+checks:
+  - command: npm test
+  - command: node --test acceptance/csv.test.js
+    files: ./checks/plan-and-build
+  - command: node acceptance/plan.mjs
+    files: ./checks/plan-and-build

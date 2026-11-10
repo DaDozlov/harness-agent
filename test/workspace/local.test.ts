@@ -111,6 +111,27 @@ describe('LocalWorkspace exec', () => {
     },
   );
 
+  it.skipIf(detectShell().name.includes('PowerShell'))(
+    'kills what ignores the request to stop, after a grace period, before dispose returns',
+    async () => {
+      const workspace = new LocalWorkspace((await tempWorkspace()).root);
+      await workspace.writeFile(
+        'stubborn.js',
+        "process.on('SIGTERM', () => {}); require('fs').writeFileSync('stubborn.pid', String(process.pid)); setTimeout(() => {}, 60000);",
+      );
+
+      // The shell ends at once on SIGTERM; the program it started does not.
+      const running = workspace.exec('node stubborn.js', { timeoutMs: 60_000 });
+      await expect.poll(() => workspace.stat('stubborn.pid'), { timeout: 10_000 }).toBeDefined();
+      const pid = Number(await readFile(join(workspace.root, 'stubborn.pid'), 'utf8'));
+      await workspace.dispose();
+
+      expect(isRunning(pid)).toBe(false);
+      await running;
+    },
+    15_000,
+  );
+
   it('keeps only the last version of lines a progress bar redraws', () => {
     expect(collapseProgress('Progress 10%\rProgress 50%\rProgress 100%\r\nDone\r\n')).toBe(
       'Progress 100%\nDone\n',
