@@ -1,0 +1,16 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 2rem;
+}
+
+/* People on the left, notes beside them. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(16rem, auto) 1fr;
+  gap: 2rem;
+}
+
+/* Long emails wrap instead of being cut off. */
+#list li {
+  overflow-wrap: anywhere;
+}

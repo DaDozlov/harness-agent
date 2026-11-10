@@ -1,0 +1,9 @@
+{
+  "name": "contacts-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,19 @@
+description: >-
+  Three independent helpers built by sub-agents at the same time (docs/DESIGN.md §4.7): each
+  gets its own files and a check, and the agent puts their work together and runs the whole
+  suite. What it measures is whether delegation works end to end: every part done to the spec,
+  nothing overwritten, the suite green at the end.
+fixture: ./fixtures/three-modules
+prompt: >-
+  Build the three helpers in SPEC.md, each in its own file with its tests. They are independent
+  of each other: have three sub-agents build them at the same time, one each, then make sure the
+  whole suite passes.
+limits:
+  maxTurns: 30
+  maxCostUsd: 1.5
+checks:
+  - command: npm test
+  - command: node --test acceptance/slug.test.js acceptance/money.test.js acceptance/days.test.js
+    files: ./checks/sub-agents
+  - called: delegate
+    atLeast: 3

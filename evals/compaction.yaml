@@ -1,0 +1,20 @@
+description: >-
+  A change across every file of a project too big for the context window given here (16k
+  tokens): the history is compacted during the run (docs/DESIGN.md §4.9), and the agent finishes
+  the work after it, without losing track of what is done and what is left. The database column
+  of the same name stays as it is.
+fixture: ./fixtures/orders-rename
+contextWindow: 16000
+prompt: >-
+  Rename the order field customerName to buyerName everywhere in the code and the tests. The
+  database column customer_name keeps its name.
+limits:
+  maxTurns: 40
+  maxCostUsd: 1
+checks:
+  - command: npm test
+  - command: node --test acceptance/renamed.test.js
+    files: ./checks/compaction
+  - command: node acceptance/no-old-name.mjs
+    files: ./checks/compaction
+  - compactions: 1

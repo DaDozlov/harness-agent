@@ -1,0 +1,1 @@
+`rm` is not allowed here, so I used the project's own script: `npm run clean` removed out/, and `npm run build` wrote out/report.html again from data/sales.json (North 1,840, South 1,215, East 960). The old regions-chart.svg is gone.

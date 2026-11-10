@@ -1,0 +1,17 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 2rem;
+}
+
+/* People on the left in a narrow column, notes beside them. */
+.layout {
+  display: grid;
+  grid-template-columns: 12rem 1fr;
+  gap: 2rem;
+}
+
+/* One line per person, so the column stays tidy. */
+#list li {
+  white-space: nowrap;
+  overflow: hidden;
+}

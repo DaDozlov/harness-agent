@@ -1,0 +1,60 @@
+# heaw's eval suite against a real model (evals/README.md). Run by hand from the Actions tab
+# before and after a change to how the agent behaves; one trial of each case costs about $1.15.
+#
+# Setup, once: the repository secrets AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT, and the
+# variable HEAW_EVAL_MODEL (e.g. azure:gpt-5.4). A committed evals/baseline.json is compared
+# with, and the run fails when a case got worse; refresh it from a run you trust (its artifact).
+name: Evals
+
+on:
+  workflow_dispatch:
+    inputs:
+      trials:
+        description: Trials per case
+        default: '1'
+      filter:
+        description: Only the cases whose name contains this (empty for all)
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evals
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      HEAW_MODEL: ${{ vars.HEAW_EVAL_MODEL }}
+      AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+      AZURE_OPENAI_ENDPOINT: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+      TRIALS: ${{ inputs.trials }}
+      FILTER: ${{ inputs.filter }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - name: Check the setup
+        run: |
+          if [ -z "$HEAW_MODEL" ]; then
+            echo "::error::Set the repository variable HEAW_EVAL_MODEL, e.g. azure:gpt-5.4."
+            exit 1
+          fi
+      - run: npm ci
+      - name: Run the suite
+        run: |
+          args=(--trials "$TRIALS" --judge-model "$HEAW_MODEL")
+          if [ -f evals/baseline.json ]; then args+=(--compare evals/baseline.json); fi
+          npm run eval -- ${FILTER:+"$FILTER"} "${args[@]}"
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: .heaw/evals/*.json
+          if-no-files-found: ignore

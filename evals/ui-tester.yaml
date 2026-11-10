@@ -1,0 +1,23 @@
+description: >-
+  A small change to a page that the tests pass but users would see is broken: the email added to
+  each contact is cut off by a rule that keeps the narrow column on one line. Only looking at the
+  page shows it. The project has a browser tester of its own (.heaw/agents/tester.md, Playwright,
+  docs/DESIGN.md §4.7); the agent has it check the page and fixes what it finds. Needs Chrome.
+fixture: ./fixtures/contacts-ui
+agents: true
+prompt: Show each contact's email next to their name in the list (formatContact in public/format.js).
+allow: ['run_command(npm run dev*)']
+limits:
+  maxTurns: 30
+  maxCostUsd: 1.5
+  maxMinutes: 12
+checks:
+  - command: npm test
+  # The email is in the line, and nothing cuts the line off.
+  - command: node --test acceptance/format.test.js
+    files: ./checks/ui-tester
+  - command: node acceptance/not-cut-off.mjs
+    files: ./checks/ui-tester
+  # The page was looked at, not only the code.
+  - called: mcp__browser__browser_take_screenshot
+    atLeast: 1
