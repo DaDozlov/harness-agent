@@ -39,8 +39,19 @@ export interface Tool {
   parse(args: unknown): { ok: true; args: unknown } | { ok: false; error: string };
   /** What permission rules match against: the command, the path or the host. */
   subject?(args: unknown): string | undefined;
+  /**
+   * Why the call cannot run now, checked before permissions, so the user is not asked to approve
+   * a call that would fail anyway (e.g. approving a plan that was never written).
+   */
+  precheck?(args: unknown, context: ToolPrecheckContext): Promise<string | undefined>;
   /** Throwing is fine: the error message becomes an error result for the model. */
   run(args: unknown, context: ToolContext): Promise<ToolOutput>;
+}
+
+/** What a tool's `precheck` can look at: the workspace, and whether the agent is in plan mode. */
+export interface ToolPrecheckContext {
+  workspace: Workspace;
+  agent?: Pick<AgentContext, 'id' | 'depth' | 'plan'> | undefined;
 }
 
 export interface ToolContext {

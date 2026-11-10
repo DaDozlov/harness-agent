@@ -113,6 +113,8 @@ const FACTORIES: Record<ProviderType, ProviderFactory> = {
       baseURL: input.read('baseURL', 'OLLAMA_BASE_URL') ?? 'http://localhost:11434/v1',
       headers: input.headers(),
       fetch: input.fetch,
+      // Without it, a streamed answer reports no tokens: no usage, no context calibration.
+      includeUsage: true,
     }).chatModel(input.modelId);
   },
   async 'openai-compatible'(input) {

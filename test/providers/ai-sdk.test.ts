@@ -404,6 +404,33 @@ describe('a stored item the provider lost', () => {
     expect(options.map(ids)).toEqual([2, 0, 0]);
   });
 
+  it('drops the reasoning effort, from then on, for a model that does not reason', async () => {
+    let calls = 0;
+    const { client, calls: options } = fakeModel(() => {
+      if (calls++ === 0) {
+        throw new APICallError({
+          message: '"qwen2.5-coder:14b" does not support thinking',
+          url: 'http://localhost:11434/v1',
+          requestBodyValues: {},
+          statusCode: 400,
+          isRetryable: false,
+        });
+      }
+      return [
+        { type: 'text-start', id: 't' },
+        { type: 'text-delta', id: 't', delta: 'ok' },
+        { type: 'text-end', id: 't' },
+        FINISH_STOP,
+      ];
+    });
+
+    const first = await collect(client.stream({ ...history, reasoningEffort: 'medium' }));
+    await collect(client.stream({ ...history, reasoningEffort: 'high' }));
+
+    expect(first.at(-1)?.type).toBe('finish');
+    expect(options.map((call) => call.reasoning)).toEqual(['medium', undefined, undefined]);
+  });
+
   it('does not hide other errors', async () => {
     const { client } = fakeModel(() => {
       throw new APICallError({

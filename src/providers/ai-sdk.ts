@@ -37,6 +37,8 @@ export class AiSdkModelClient implements ModelClient {
   readonly #model: LanguageModelV4;
   /** The provider lost an item the history referred to: from then on, it goes inline. */
   #inline = false;
+  /** The model refused a reasoning effort (it does not reason): from then on, none is sent. */
+  #noReasoning = false;
 
   constructor(id: string, model: LanguageModelV4, capabilities: ModelCapabilities) {
     this.id = id;
@@ -53,15 +55,30 @@ export class AiSdkModelClient implements ModelClient {
   async *stream(request: ModelRequest, signal?: AbortSignal): AsyncIterable<ModelStreamEvent> {
     let started = false;
     try {
-      for await (const event of this.#streamOnce(request, signal)) {
+      for await (const event of this.#streamOnce(this.#withoutRefused(request), signal)) {
         started = true;
         yield event;
       }
     } catch (error) {
-      if (started || this.#inline || !isMissingItem(error)) throw error;
-      this.#inline = true;
-      yield* this.#streamOnce(request, signal);
+      if (started) throw error;
+      if (!this.#inline && isMissingItem(error)) {
+        this.#inline = true;
+      } else if (!this.#noReasoning && request.reasoningEffort && refusesReasoning(error)) {
+        // A reasoning effort set for the whole project reaches models that cannot reason, and
+        // some providers reject it ("does not support thinking", Ollama); others ignore it.
+        this.#noReasoning = true;
+      } else {
+        throw error;
+      }
+      yield* this.stream(request, signal);
     }
+  }
+
+  #withoutRefused(request: ModelRequest): ModelRequest {
+    if (!this.#noReasoning || !request.reasoningEffort) return request;
+    const copy = { ...request };
+    delete copy.reasoningEffort;
+    return copy;
   }
 
   async *#streamOnce(
@@ -243,6 +260,17 @@ function isMissingItem(error: unknown): boolean {
     error instanceof ModelError &&
     error.status === 400 &&
     /item with id '[^']*' not found/i.test(error.message)
+  );
+}
+
+/** The model rejected the reasoning effort because it does not reason. */
+function refusesReasoning(error: unknown): boolean {
+  return (
+    error instanceof ModelError &&
+    error.status === 400 &&
+    /does not support (thinking|reasoning)|reasoning(_effort|\.effort)?\b[^.]*\b(not supported|unsupported)|unsupported (parameter|value)[^.]*reasoning/i.test(
+      error.message,
+    )
   );
 }
 

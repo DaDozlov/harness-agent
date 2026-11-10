@@ -59,11 +59,19 @@ export const finishPlan = defineTool({
       ),
   }),
   subject: (args) => args.summary,
-  async run(_args, { agent, workspace }) {
+  // Before the user is asked: approving a plan that does not exist helps nobody.
+  async precheck(_args, { agent, workspace }) {
+    if (!agent?.plan?.active()) return 'Plan mode is not on.';
+    if (await workspace.stat(PLAN_FILE)) return undefined;
+    return (
+      `There is no ${PLAN_FILE} yet, so there is nothing to approve. Follow the plan-work skill: ` +
+      'ask the user the questions whose answers change the design and wait for their answers, ' +
+      `then write ${PLAN_FILE} with write_file (goal, requirements, design, risks, tests, steps ` +
+      'with checks), and only then call finish_plan.'
+    );
+  },
+  run(_args, { agent }) {
     if (!agent?.plan?.active()) return { output: 'Plan mode is not on.', isError: true };
-    if (!(await workspace.stat(PLAN_FILE))) {
-      return { output: `There is no ${PLAN_FILE} yet. Write it first.`, isError: true };
-    }
     agent.plan.leave();
     agent.plan.build();
     return `The user approved ${PLAN_FILE}, and plan mode is off. ${BUILD_INSTRUCTIONS}`;

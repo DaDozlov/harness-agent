@@ -139,6 +139,22 @@ describe('building an approved plan', () => {
     expect(session.buildingPlan).toBe(true);
   });
 
+  it('does not ask the user to approve a plan that was never written', async () => {
+    const { engine, model } = await engineWith([
+      call('start_plan', { reason: 'Big task.' }),
+      call('finish_plan', { summary: 'A plan.' }),
+      { text: 'I will ask first.' },
+    ]);
+
+    const events = await run(engine.session(), 'Build the comparator');
+    await engine.dispose();
+
+    expect(events.some((event) => event.type === 'approval.request')).toBe(false);
+    expect(JSON.stringify(model.requests[2]?.messages.at(-1))).toContain(
+      'There is no PLAN.md yet, so there is nothing to approve. Follow the plan-work skill',
+    );
+  });
+
   it('tells the agent once when a change drops a step the user approved', async () => {
     const { engine, model } = await engineWith([
       ...approved,

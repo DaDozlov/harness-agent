@@ -188,6 +188,12 @@ async function* authorize(
   if ('finished' in hooked) return hooked;
   const { args, allowedByHook } = hooked;
 
+  // A call that would fail anyway is not put to the user.
+  const problem = await tool
+    .precheck?.(args, { workspace: runtime.workspace, agent: runtime.agent })
+    .catch((cause: unknown) => (cause instanceof Error ? cause.message : String(cause)));
+  if (problem) return { finished: error(problem) };
+
   // Permissions see the arguments as the hooks left them.
   const subject = subjectOf(tool, args, runtime.workspace);
   const approved: Approved = { call, tool, args, subject };

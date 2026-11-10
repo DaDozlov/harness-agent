@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import type { Tool, ToolContext, ToolKind, ToolOutput } from '../core/tools.js';
+import type {
+  Tool,
+  ToolContext,
+  ToolKind,
+  ToolOutput,
+  ToolPrecheckContext,
+} from '../core/tools.js';
 
 export interface ToolDefinition<Schema extends z.ZodType> {
   name: string;
@@ -16,6 +22,11 @@ export interface ToolDefinition<Schema extends z.ZodType> {
   output?: Tool['output'];
   /** What permission rules match against, e.g. the path or command. */
   subject?: (args: z.output<Schema>) => string | undefined;
+  /** Why the call cannot run now, checked before the user is asked (see `Tool.precheck`). */
+  precheck?: (
+    args: z.output<Schema>,
+    context: ToolPrecheckContext,
+  ) => Promise<string | undefined> | string | undefined;
   run(args: z.output<Schema>, context: ToolContext): ToolOutput | Promise<ToolOutput>;
 }
 
@@ -46,6 +57,10 @@ export function defineTool<Schema extends z.ZodType>(definition: ToolDefinition<
         : { ok: false, error: z.prettifyError(result.error) };
     },
     ...(subject && { subject: (args: unknown) => subject(args as z.output<Schema>) }),
+    ...(definition.precheck && {
+      precheck: async (args: unknown, context: ToolPrecheckContext) =>
+        definition.precheck!(args as z.output<Schema>, context),
+    }),
     run: async (args, context) => definition.run(args as z.output<Schema>, context),
   };
 }
