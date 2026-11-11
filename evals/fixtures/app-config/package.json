@@ -1,0 +1,9 @@
+{
+  "name": "app-config",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "show-config": "node scripts/show-config.mjs",
+    "test": "node --test"
+  }
+}

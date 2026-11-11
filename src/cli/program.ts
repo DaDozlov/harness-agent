@@ -20,6 +20,7 @@ import {
   mcpRemove,
   mcpSearch,
   mcpTest,
+  mcpTrust,
   type Scope,
 } from './commands/mcp.js';
 import { defaultRunContext, runCommand, type RunCommandOptions } from './commands/run.js';
@@ -246,6 +247,14 @@ function addMcpCommands(program: Command, { packageEntry }: ProgramOptions): voi
     .argument('<name>')
     .action(async (name: string) => {
       await run((context) => mcpTest(name, context));
+    });
+
+  mcp
+    .command('trust')
+    .description('Accept the tools a server changed or added since it was first connected')
+    .argument('<name>')
+    .action(async (name: string) => {
+      await run((context) => mcpTrust(name, context));
     });
 
   mcp

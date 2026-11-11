@@ -1,7 +1,7 @@
 import { SUMMARY_PREFIX } from '../../core/context.js';
 import type { SerializedError } from '../../core/errors.js';
 import type { EngineEvent, HookName, StopReason } from '../../core/events.js';
-import { type Message, textOf } from '../../core/messages.js';
+import { isHeawNote, type Message, textOf } from '../../core/messages.js';
 import type { ToolStatus } from '../../core/tools.js';
 import { addUsage, type Usage } from '../../core/usage.js';
 import { type TodoItem, todosIn } from '../../tools/todo.js';
@@ -243,7 +243,8 @@ function applyEvent(state: TranscriptState, event: EngineEvent): TranscriptState
         text: from + describeError(event.error, event.recoverable),
       }));
     case 'run.end': {
-      const closed = closeAssistant(state);
+      // Nothing the run started still works for it, e.g. a tester a hook left when interrupted.
+      const closed = closeAssistant(stopAgents(state));
       const note = STOP_NOTES[event.stopReason];
       return note
         ? push(closed, (id) => ({ kind: 'notice', id, tone: note.tone, text: note.text }))
@@ -333,6 +334,19 @@ function closeAgentLine(state: TranscriptState, agentId: string): TranscriptStat
         item.kind === 'agent' && item.agentId === agentId ? { ...item, open: false } : item,
       )
     : state;
+}
+
+function stopAgents(state: TranscriptState): TranscriptState {
+  const running = Object.entries(state.agents).filter(([, view]) => view.running);
+  if (!running.length) return state;
+  const agents = { ...state.agents };
+  for (const [id, view] of running) agents[id] = { ...view, running: false };
+  return { ...state, agents };
+}
+
+/** An agent a hook started (a tester), still working: it has no tool call to show it. */
+export function hookAgentRunning(state: TranscriptState): SubagentView | undefined {
+  return Object.values(state.agents).find((view) => view.running && !view.delegate);
 }
 
 function withAgent(
@@ -454,6 +468,8 @@ export function itemsFromHistory(messages: Message[]): TranscriptItem[] {
       });
       continue;
     }
+    // heaw's notes to the agent (near a limit, going in circles) showed as notices at the time.
+    if (isHeawNote(message)) continue;
     if (message.role === 'user') items.push({ kind: 'user', id: id(), text: textOf(message) });
     if (message.role !== 'assistant') continue;
     // The acknowledgement that follows a summary is bookkeeping, not part of the conversation.

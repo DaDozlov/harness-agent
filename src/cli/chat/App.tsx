@@ -19,6 +19,7 @@ import { approvalPreview } from './preview.js';
 import { glyphs } from './theme.js';
 import {
   createTranscript,
+  hookAgentRunning,
   itemsFromHistory,
   type TranscriptItem,
   transcriptReducer,
@@ -283,6 +284,7 @@ function ChatApp({
   const last = transcript.items.at(-1);
   const busy = last?.kind === 'tool' && last.status === 'running';
   const streaming = last?.kind === 'assistant' && !last.done;
+  const checking = hookAgentRunning(transcript);
   const suggestions = approval ? [] : matchCommands(input.buffer.text);
   const { rows, columns } = useWindowSize();
   const space = { rows: Math.max(4, rows - RESERVED_ROWS), columns: Math.max(20, columns - 2) };
@@ -318,7 +320,9 @@ function ChatApp({
       ) : null}
       {running && !approval && !busy && !streaming ? (
         <Box marginTop={1}>
-          <Spinner label="Thinking…" />
+          <Spinner
+            label={checking ? `${checking.label} is checking… (Esc to stop)` : 'Thinking…'}
+          />
         </Box>
       ) : null}
       {approval ? (

@@ -15,6 +15,7 @@ import {
   writeServerToFile,
 } from '../../mcp/config.js';
 import { McpManager } from '../../mcp/manager.js';
+import { MCP_PINS_FILE, McpPins } from '../../mcp/pins.js';
 import {
   loginProblem,
   loginToMcpServer,
@@ -196,6 +197,35 @@ export async function mcpTest(name: string, context: McpContext): Promise<number
   }
 }
 
+/**
+ * `heaw mcp trust <name>`: accepts a server's tools as they are now, releasing those held back
+ * because they changed or were added since the server was first connected.
+ */
+export async function mcpTrust(name: string, context: McpContext): Promise<number> {
+  const { servers, loaded } = await locations(context);
+  const entry = (await servers()).find((candidate) => candidate.name === name);
+  if (!entry) {
+    context.stderr.write(`No MCP server named "${name}". See heaw mcp list.\n`);
+    return 2;
+  }
+  const manager = await connect([entry], context, loaded.projectRoot);
+  try {
+    const held = manager.statuses()[0]?.held ?? [];
+    if (!manager.trust(name)) {
+      context.stderr.write(`${describeMcpServer(manager.statuses()[0]!)}\n`);
+      return 1;
+    }
+    context.stdout.write(
+      held.length
+        ? `Accepted the changed tools of "${name}": ${held.join(', ')}.\n`
+        : `"${name}" had no changed tools; its tools are pinned as they are now.\n`,
+    );
+    return 0;
+  } finally {
+    await manager.dispose();
+  }
+}
+
 /** `heaw mcp remove <name>`: from `.mcp.json`, or `~/.heaw/mcp.json` with `--scope personal`. */
 export async function mcpRemove(
   name: string,
@@ -225,6 +255,7 @@ async function connect(entries: McpServerEntry[], context: McpContext, projectRo
     env: context.env,
     cwd: projectRoot,
     clientInfo: { name: 'heaw', version: VERSION },
+    pins: new McpPins(join(heawHome(context.env), MCP_PINS_FILE)),
     authProvider: (entry, url) =>
       new McpOAuthProvider(store, url.href, oauthSettingsOf(entry, context.env)),
   });

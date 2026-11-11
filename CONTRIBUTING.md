@@ -14,6 +14,8 @@ npm run dev        # rebuild dist/ on change; npm link for a global `heaw`
 
 ## Rules
 
+The same rules, short, for coding agents: [AGENTS.md](AGENTS.md). Security reports: [SECURITY.md](SECURITY.md).
+
 - **Layers** (`npm run lint:deps`): `src/core/` imports nothing outside it; only `src/cli/` imports `src/cli/`; no devDependencies in `src/`; no cycles.
 - **Style**: TypeScript strict, ESM, `.js` in relative imports; Prettier for code (Markdown by hand).
 - **Tests**: vitest in `test/`, with the scripted model instead of real APIs and a temporary `HEAW_HOME`. Must pass on Windows, macOS and Linux.

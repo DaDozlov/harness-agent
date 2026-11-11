@@ -101,6 +101,24 @@ export function userMessage(text: string): UserMessage {
   return { role: 'user', content: [{ type: 'text', text }] };
 }
 
+/**
+ * Notes from heaw itself (near a limit, going in circles, the turn limit reached), each starting
+ * with `heaw:`, as a message of their own after the tool results: the model is told that what
+ * tools return is data, not instructions, and a note at the end of a result read as part of it.
+ */
+export function heawNote(notes: string[]): UserMessage {
+  return userMessage(notes.map((note) => `[${note}]`).join('\n\n'));
+}
+
+export function isHeawNote(message: Message): boolean {
+  return message.role === 'user' && textOf(message).startsWith('[heaw: ');
+}
+
+/** The message without tool calls a provider sent although none were allowed. */
+export function withoutToolCalls(message: AssistantMessage): AssistantMessage {
+  return { ...message, content: message.content.filter((part) => part.type !== 'tool-call') };
+}
+
 /** The concatenated text parts of a message, without reasoning. */
 export function textOf(message: Message): string {
   return message.content.map((part) => (part.type === 'text' ? part.text : '')).join('');

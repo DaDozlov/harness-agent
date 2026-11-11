@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createProjectEngine } from '../src/project.js';
+import { createProjectEngine, loadProject } from '../src/project.js';
 import { tempDirFactory } from './helpers.js';
 
 const tempDir = tempDirFactory();
@@ -45,5 +45,37 @@ describe('createProjectEngine', () => {
     );
     await engine.dispose();
     expect(stopped).toBe(true);
+  });
+});
+
+describe('an unattended run in bypass mode', () => {
+  const load = async (workspace?: string) => {
+    const root = await tempDir();
+    await writeFile(
+      join(root, 'heaw.config.ts'),
+      `export default { model: 'ollama:test-model'${workspace ? `, workspace: ${workspace}` : ''} };`,
+    );
+    const options = {
+      cwd: root,
+      env: { HEAW_HOME: join(root, 'home') },
+      packageEntry: resolve('src/index.ts'),
+      save: false,
+      mode: 'bypass' as const,
+    };
+    return { root, unattended: await loadProject({ ...options, interactive: false }), options };
+  };
+
+  it('runs its commands in Docker, unless the config chooses the local workspace', async () => {
+    const { root, unattended, options } = await load();
+    expect(unattended.createWorkspace(root).kind).toBe('docker');
+    expect(unattended.warnings.join('\n')).toContain('commands run in a Docker container');
+
+    // Someone is there to answer: the chat warns about bypass instead.
+    const chat = await loadProject({ ...options, interactive: true });
+    expect(chat.createWorkspace(root).kind).toBe('local');
+
+    const local = await load("{ type: 'local' }");
+    expect(local.unattended.createWorkspace(local.root).kind).toBe('local');
+    expect(local.unattended.warnings).toEqual([]);
   });
 });

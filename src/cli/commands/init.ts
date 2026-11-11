@@ -104,9 +104,9 @@ async function testCommand(dir: string): Promise<string | undefined> {
 const COMMENTED_VERIFICATION = `  // Without a hook, heaw sends the agent back once when it changed files and ran nothing since.
   // Checks the agent must pass before it may finish a run that changed files, e.g. the tests:
   // hooks: {
-  //   async beforeStop({ workspace, editedFiles }) {
+  //   async beforeStop({ workspace, editedFiles, signal }) {
   //     if (!editedFiles.length) return;
-  //     const tests = await workspace.exec('npm test', { timeoutMs: 600_000 });
+  //     const tests = await workspace.exec('npm test', { timeoutMs: 600_000, signal });
   //     if (tests.exitCode !== 0) return { continue: true, feedback: tests.output.slice(-4_000) };
   //   },
   // },`;
@@ -115,9 +115,9 @@ function verificationTemplate(tests: string): string {
   return [
     '  hooks: {',
     '    // The agent may only finish a run that changed files once the tests pass.',
-    '    async beforeStop({ workspace, editedFiles }) {',
+    '    async beforeStop({ workspace, editedFiles, signal }) {',
     '      if (!editedFiles.length) return;',
-    `      const tests = await workspace.exec('${tests}', { timeoutMs: 600_000 });`,
+    `      const tests = await workspace.exec('${tests}', { timeoutMs: 600_000, signal });`,
     '      if (tests.exitCode !== 0) {',
     '        return { continue: true, feedback: `The tests fail:\\n${tests.output.slice(-4_000)}` };',
     '      }',

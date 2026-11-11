@@ -17,6 +17,10 @@ import { killTree } from './process.js';
 
 /** Where the project is mounted inside the container, and where commands start. */
 export const CONTAINER_ROOT = '/workspace';
+/** Processes a container may run at once: plenty for builds, too few for a fork bomb. */
+const PIDS_LIMIT = 1024;
+/** What npm, pip or apt need as root to install into the image; every other capability goes. */
+const KEPT_CAPABILITIES = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETUID', 'SETGID'];
 export const DEFAULT_IMAGE = 'node:24';
 
 export interface DockerOptions {
@@ -312,6 +316,15 @@ export function dockerRunArgs(options: {
     '--rm',
     // An init process reaps the zombies that killed commands leave behind.
     '--init',
+    // Nothing gains rights (setuid programs such as sudo), a fork bomb stays inside, and of the
+    // kernel capabilities only those that installing packages as root needs are kept.
+    '--security-opt',
+    'no-new-privileges',
+    '--pids-limit',
+    String(PIDS_LIMIT),
+    '--cap-drop',
+    'ALL',
+    ...KEPT_CAPABILITIES.flatMap((capability) => ['--cap-add', capability]),
     '--name',
     options.name,
     '--label',

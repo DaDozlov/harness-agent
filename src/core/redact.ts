@@ -1,5 +1,12 @@
 /** Variable names that usually hold secrets. */
 const SECRET_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|(^|_)PAT($|_)/i;
+/** Names that look like secrets but are needed and are none: an SSH agent's socket, X11 auth. */
+const NOT_SECRET = new Set(['SSH_AUTH_SOCK', 'SSH_AGENT_PID', 'XAUTHORITY', 'GPG_AGENT_INFO']);
+
+/** Whether a variable's name says it holds a secret (API keys, tokens, passwords). */
+export function isSecretName(name: string): boolean {
+  return SECRET_NAME.test(name) && !NOT_SECRET.has(name.toUpperCase());
+}
 /** Shorter values would match ordinary words and numbers. */
 const MIN_SECRET_LENGTH = 8;
 const MARK = '[redacted]';
@@ -46,7 +53,7 @@ export function secretsFromEnv(
   referenced: Iterable<string> = [],
 ): string[] {
   const names = new Set(referenced);
-  for (const name of Object.keys(env)) if (SECRET_NAME.test(name)) names.add(name);
+  for (const name of Object.keys(env)) if (isSecretName(name)) names.add(name);
   return [...names].flatMap((name) => {
     const value = env[name]?.trim();
     return value ? [value] : [];

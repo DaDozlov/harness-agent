@@ -4,9 +4,9 @@ import { isAbortError } from './errors.js';
 import type { ApprovalDecision, ApprovalRequest, EngineEvent, EngineEventBody } from './events.js';
 import { type HookContext, type HookFailure, hookFailureEvent, type HookRunner } from './hooks.js';
 import type { ToolCallPart, ToolImage, ToolResultPart } from './messages.js';
-import { type PermissionPolicy, type Subject, suggestRule } from './permissions.js';
+import { type PermissionPolicy, splitCommands, type Subject, suggestRule } from './permissions.js';
 import { EventQueue } from './event-queue.js';
-import { type LoopDetector, type StuckSignal, stuckNote } from './stuck.js';
+import type { LoopDetector, StuckSignal } from './stuck.js';
 import {
   type AgentContext,
   concurrencyOf,
@@ -93,7 +93,8 @@ export async function* executeToolCalls(
 ): AsyncGenerator<EngineEvent, ToolResultPart[]> {
   const results = new Map<string, ToolResultPart>();
   function* finish(call: ToolCallPart, result: Finished): Generator<EngineEvent> {
-    // Going in circles: the agent is told on this result, the user with an event.
+    // Going in circles: an event, from which the loop tells the agent after the results (a note
+    // inside a result would read as part of the tool's output) and the chat tells the user.
     const stuck =
       result.stuck ??
       runtime.loops?.finished({
@@ -102,7 +103,7 @@ export async function* executeToolCalls(
         output: result.output,
         status: result.status,
       });
-    const output = stuck ? `${result.output}\n\n[${stuckNote(stuck)}]` : result.output;
+    const { output } = result;
     results.set(call.id, {
       type: 'tool-result',
       callId: call.id,
@@ -212,7 +213,7 @@ async function* authorize(
   if (check.decision === 'deny') return { finished: denied(`Permission denied: ${check.reason}.`) };
 
   if (!runtime.interactive) {
-    return { finished: denied(nonInteractiveDenial(tool, subject, check.reason, runtime)) };
+    return { finished: denied(await nonInteractiveDenial(tool, subject, check.reason, runtime)) };
   }
 
   const request: ApprovalRequest = {
@@ -253,22 +254,54 @@ async function* authorize(
 }
 
 /** Tells the model what it may do instead, so it can adjust rather than give up. */
-function nonInteractiveDenial(
+async function nonInteractiveDenial(
   tool: Tool,
   subject: Subject | undefined,
   reason: string,
   runtime: ToolRuntime,
-): string {
+): Promise<string> {
   const rule = suggestRule(tool.name, subject);
   const allowed = runtime.permissions.allowRulesFor(tool.name);
   const alternatives = allowed.length
     ? ` These ${tool.name} calls are allowed in this run: ${allowed.join(', ')}.`
     : '';
+  const script = subject?.type === 'text' ? await npmScriptFor(subject.value, tool, runtime) : '';
   return (
     `Permission denied: this action needs approval because ${reason}, and this run ` +
-    `cannot ask the user.${alternatives} To allow this exact call, the user can run ` +
+    `cannot ask the user.${script}${alternatives} To allow this exact call, the user can run ` +
     `again with the rule "${rule}".`
   );
+}
+
+/**
+ * A refused command that is one of the project's npm scripts, which may be allowed that way:
+ * agents run `node scripts/clean.mjs` where the rules allow `npm run clean` (an eval trial left a
+ * folder undeleted this way). Empty when there is none.
+ */
+async function npmScriptFor(command: string, tool: Tool, runtime: ToolRuntime): Promise<string> {
+  let scripts: Record<string, unknown>;
+  try {
+    const manifest = JSON.parse((await runtime.workspace.readFile('package.json')).toString()) as {
+      scripts?: Record<string, unknown>;
+    };
+    scripts = manifest.scripts ?? {};
+  } catch {
+    return '';
+  }
+  const tidy = (text: string) => text.trim().replace(/\s+/g, ' ');
+  // Each command of a line counts: `node scripts/clean.mjs && npm run build` too.
+  const parts = new Set(
+    (splitCommands(command) ?? [{ text: command }]).map((part) => tidy(part.text)),
+  );
+  for (const [name, script] of Object.entries(scripts)) {
+    if (typeof script !== 'string' || !parts.has(tidy(script))) continue;
+    const viaNpm = `npm run ${name}`;
+    const check = runtime.permissions.check(tool, { type: 'text', value: viaNpm });
+    if (check.decision === 'allow') {
+      return ` This is the project's script "${name}": run it as \`${viaNpm}\`, which is allowed.`;
+    }
+  }
+  return '';
 }
 
 /** Lets `beforeToolCall` hooks block the call, change its arguments or allow it. */

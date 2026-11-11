@@ -181,7 +181,7 @@ export function toCallOptions(
   }));
   return {
     prompt: toPrompt(request, options),
-    ...(tools?.length && { tools, toolChoice: { type: 'auto' } }),
+    ...(tools?.length && { tools, toolChoice: { type: request.toolChoice ?? 'auto' } }),
     ...(request.maxOutputTokens !== undefined && { maxOutputTokens: request.maxOutputTokens }),
     ...(request.temperature !== undefined && { temperature: request.temperature }),
     ...(request.reasoningEffort && { reasoning: request.reasoningEffort }),

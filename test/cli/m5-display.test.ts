@@ -8,7 +8,7 @@ import {
 import { runPrompt } from '../../src/cli/commands/run.js';
 import { SUMMARY_PREFIX } from '../../src/core/context.js';
 import type { EngineEventBody } from '../../src/core/events.js';
-import { userMessage } from '../../src/core/messages.js';
+import { heawNote, userMessage } from '../../src/core/messages.js';
 import { emptyUsage } from '../../src/core/usage.js';
 import { createEngine } from '../../src/engine.js';
 import { ScriptedModelClient } from '../../src/providers/scripted.js';
@@ -79,6 +79,19 @@ describe('the chat shows M5 activity', () => {
     expect(items).toMatchObject([
       { kind: 'notice', text: 'Earlier turns were summarized.' },
       { kind: 'user', text: 'Next step?' },
+    ]);
+  });
+
+  it("leaves heaw's notes to the agent out of a resumed conversation", () => {
+    const items = itemsFromHistory([
+      userMessage('Fix the tests'),
+      heawNote(['heaw: this message has used 80% of its turns limit (8 of 10 turns).']),
+      { role: 'assistant', content: [{ type: 'text', text: 'Fixed.' }] },
+    ]);
+
+    expect(items).toMatchObject([
+      { kind: 'user', text: 'Fix the tests' },
+      { kind: 'assistant', text: 'Fixed.' },
     ]);
   });
 

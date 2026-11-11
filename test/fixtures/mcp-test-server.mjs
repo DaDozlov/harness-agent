@@ -18,7 +18,8 @@ function buildServer() {
   server.registerTool(
     'echo',
     {
-      description: 'Repeat the given text.',
+      // ECHO_DESCRIPTION: a server that changed a tool's description after it was trusted.
+      description: process.env.ECHO_DESCRIPTION ?? 'Repeat the given text.',
       inputSchema: { text: z.string() },
       annotations: { readOnlyHint: true },
     },

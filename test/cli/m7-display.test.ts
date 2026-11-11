@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { runSlashCommand } from '../../src/cli/chat/commands.js';
-import { createTranscript, transcriptReducer } from '../../src/cli/chat/transcript.js';
+import {
+  createTranscript,
+  hookAgentRunning,
+  transcriptReducer,
+} from '../../src/cli/chat/transcript.js';
 import { runPrompt } from '../../src/cli/commands/run.js';
 import type { EngineEventBody } from '../../src/core/events.js';
 import { emptyUsage } from '../../src/core/usage.js';
@@ -195,6 +199,45 @@ describe('sub-agents in the chat', () => {
       } as never,
     });
     expect(state.items.at(-1)).toMatchObject({ kind: 'agent', label: 'ui-builder' });
+  });
+
+  it("names a hook's agent while it works, until it ends or the run does", () => {
+    const main = { sessionId: 's', agentId: 'main', timestamp: 0 };
+    const start = (n: number) =>
+      ({
+        ...main,
+        type: 'subagent.start',
+        childAgentId: `ui-tester-hook-${n}`,
+        name: 'ui-tester',
+        task: 'Changed: app/page.tsx.',
+      }) as never;
+    let state = createTranscript(emptyUsage());
+    state = transcriptReducer(state, { type: 'event', event: start(1) });
+    expect(hookAgentRunning(state)).toMatchObject({ label: 'ui-tester' });
+
+    state = transcriptReducer(state, {
+      type: 'event',
+      event: {
+        ...main,
+        type: 'subagent.end',
+        childAgentId: 'ui-tester-hook-1',
+        name: 'ui-tester',
+        stopReason: 'end_turn',
+        turns: 9,
+        usage: emptyUsage(),
+        summary: 'Verdict: works',
+      } as never,
+    });
+    expect(hookAgentRunning(state)).toBeUndefined();
+    expect(state.items.at(-1)).toMatchObject({ kind: 'notice', text: 'ui-tester: Verdict: works' });
+
+    // Interrupted before its end arrived: the run's end stops it all the same.
+    state = transcriptReducer(state, { type: 'event', event: start(2) });
+    state = transcriptReducer(state, {
+      type: 'event',
+      event: { ...main, type: 'run.end', stopReason: 'aborted', usage: emptyUsage(), turns: 3 },
+    });
+    expect(hookAgentRunning(state)).toBeUndefined();
   });
 
   it('/agents and /skills list what the agent can use', async () => {

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { describeNearLimit, describeStuck } from '../../src/cli/format.js';
 import type { EngineEvent } from '../../src/core/events.js';
 import { nearLimit, nearLimitNote } from '../../src/core/loop.js';
+import { isHeawNote, textOf } from '../../src/core/messages.js';
 import type { ModelCapabilities, ModelRequest } from '../../src/core/model.js';
 import { Session, type SessionOptions } from '../../src/core/session.js';
 import { LoopDetector } from '../../src/core/stuck.js';
@@ -43,8 +44,14 @@ async function setup(
 }
 
 const call = (name: string, args: unknown): ScriptedResponse => ({ toolCalls: [{ name, args }] });
-const lastOutput = (request: ModelRequest | undefined) => {
+/** heaw's note after the last tool results, if the request ends with one. */
+const lastNote = (request: ModelRequest | undefined) => {
   const message = request?.messages.at(-1);
+  return message && isHeawNote(message) ? textOf(message) : '';
+};
+/** The outputs of the last tool results, which carry no notes of heaw's. */
+const lastOutputs = (request: ModelRequest | undefined) => {
+  const message = request?.messages.findLast((candidate) => candidate.role === 'tool');
   return message?.role === 'tool' ? message.content.map((part) => part.output).join('\n') : '';
 };
 const stuckEvents = (events: EngineEvent[]) =>
@@ -68,11 +75,13 @@ describe('going in circles', () => {
 
     const events = await collect(session.send('Fix the tests'));
 
-    expect(lastOutput(model.requests[2])).not.toContain('heaw:');
-    expect(lastOutput(model.requests[3])).toContain(
-      'heaw: this failed the same way 3 times now (check). Small variations of the same fix rarely help.',
+    expect(lastNote(model.requests[2])).toBe('');
+    // In a message of its own: what tools return is data, and a note inside it read as such.
+    expect(lastNote(model.requests[3])).toContain(
+      '[heaw: this failed the same way 3 times now (check). Small variations of the same fix rarely help.',
     );
-    expect(lastOutput(model.requests[4])).not.toContain('heaw:');
+    expect(lastOutputs(model.requests[3])).not.toContain('heaw:');
+    expect(lastNote(model.requests[4])).toBe('');
     expect(stuckEvents(events)).toEqual([
       expect.objectContaining({ signal: 'same-failure', subject: 'check', count: 3 }),
     ]);
@@ -97,7 +106,7 @@ describe('going in circles', () => {
     const events = await collect(session.send('Fix the tests'));
 
     expect(stuckEvents(events)).toEqual([]);
-    expect(lastOutput(model.requests[3])).not.toContain('heaw:');
+    expect(lastNote(model.requests[3])).toBe('');
   });
 
   it('notices a file going back and forth between the same contents', async () => {
@@ -114,8 +123,8 @@ describe('going in circles', () => {
 
     const events = await collect(session.send('Fix a'));
 
-    expect(lastOutput(model.requests[3])).not.toContain('heaw:');
-    expect(lastOutput(model.requests[4])).toContain(
+    expect(lastNote(model.requests[3])).toBe('');
+    expect(lastNote(model.requests[4])).toContain(
       'heaw: a.ts is back to content it had earlier in this task, for the second time: your changes go back and forth.',
     );
     expect(stuckEvents(events)).toEqual([

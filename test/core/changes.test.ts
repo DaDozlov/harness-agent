@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentDefinition } from '../../src/agents/definitions.js';
+import type { EngineEvent } from '../../src/core/events.js';
 import { createEngine, type EngineOptions } from '../../src/engine.js';
 import { ScriptedModelClient, type ScriptedResponse } from '../../src/providers/scripted.js';
 import { collect, tempWorkspaceFactory } from '../helpers.js';
@@ -135,10 +136,13 @@ describe('runAgent in hooks', () => {
     let reviews = 0;
     const { model, engine } = await engineWith(
       [
-        { text: 'All done.' },
+        { text: 'All done.', usage: { inputTokens: 100, outputTokens: 10 } },
         // The reviewer's run.
-        { text: 'Looks wrong: answer should be 42.' },
-        { text: 'Fixed per the review.' },
+        {
+          text: 'Looks wrong: answer should be 42.',
+          usage: { inputTokens: 2_000, outputTokens: 200 },
+        },
+        { text: 'Fixed per the review.', usage: { inputTokens: 100, outputTokens: 10 } },
       ],
       {
         hooks: {
@@ -173,5 +177,49 @@ describe('runAgent in hooks', () => {
     expect(JSON.stringify(model.requests[2]?.messages.at(-1))).toContain(
       'Looks wrong: answer should be 42.',
     );
+    // The reviewer's model call counts into the run, as the chat's cost and the cost limit see it.
+    const calls = events.filter((event) => event.type === 'usage');
+    expect(calls.map((event) => event.usage.inputTokens)).toEqual([100, 2_000, 100]);
+    expect(events.at(-1)).toMatchObject({
+      type: 'run.end',
+      usage: { inputTokens: 2_200, outputTokens: 220 },
+    });
+  });
+
+  it('shows the agent while it runs, and Esc stops it', async () => {
+    const { engine } = await engineWith(
+      [
+        { text: 'All done.' },
+        // The reviewer's run, which would take about a minute.
+        { text: 'A slow and thorough review.', chunkSize: 1, chunkDelayMs: 2_000 },
+      ],
+      {
+        hooks: {
+          async beforeStop({ runAgent, agentId }) {
+            if (agentId !== 'main' || !runAgent) return undefined;
+            const review = await runAgent('reviewer', 'Review the change');
+            return { continue: true, feedback: review.text };
+          },
+        },
+      },
+    );
+    const controller = new AbortController();
+    const events: EngineEvent[] = [];
+    const started = Date.now();
+
+    const session = engine.session();
+    for await (const event of session.send('Change the answer', { signal: controller.signal })) {
+      events.push(event);
+      // The start arrives while the reviewer works, so the user can press Esc then.
+      if (event.type === 'subagent.start') controller.abort();
+    }
+    await engine.dispose();
+
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(events.filter((event) => event.type.startsWith('subagent.'))).toMatchObject([
+      { type: 'subagent.start', name: 'reviewer' },
+      { type: 'subagent.end', name: 'reviewer', stopReason: 'aborted' },
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', stopReason: 'aborted' });
   });
 });

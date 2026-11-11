@@ -1,0 +1,9 @@
+{
+  "name": "invoice-tax",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "telemetry": "node scripts/telemetry.mjs"
+  }
+}

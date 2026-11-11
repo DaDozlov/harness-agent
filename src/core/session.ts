@@ -4,7 +4,9 @@ import { compactHistory, ContextMeter, usableWindow } from './context.js';
 import type { ApprovalDecision, ApprovalRequest, EngineEvent, EngineEventBody } from './events.js';
 import { commitsSince, gitHead, gitState } from './git.js';
 import {
+  type HookAgentResult,
   type HookContext,
+  HookEvents,
   type HookFailure,
   hookFailureEvent,
   HookRunner,
@@ -139,8 +141,8 @@ export interface SessionOptions {
   observe?: ((event: EngineEvent) => void) | undefined;
   /** For a sub-agent: the change tracker of the session that owns the conversation. */
   changes?: FileChanges | undefined;
-  /** Offered to hooks as `HookContext.runAgent`. */
-  runAgent?: HookContext['runAgent'];
+  /** Offered to hooks as `HookContext.runAgent`, bound to the run's signal so Esc stops it. */
+  runAgent?: HookRunAgent | undefined;
   /** What the session is for, e.g. build, explore or ask: saved, and stamped on each run. */
   intent?: string | undefined;
   /**
@@ -156,6 +158,16 @@ export interface SessionOptions {
   /** How hard the model thinks, for models that reason. Default: the provider's. */
   reasoningEffort?: 'low' | 'medium' | 'high' | undefined;
 }
+
+/**
+ * Runs a named agent for a hook. The signal is the run's, so interrupting the run stops it;
+ * `onEvent` sees the agent's events, of which its model calls count into the run.
+ */
+export type HookRunAgent = (
+  name: string,
+  task: string,
+  run: { signal: AbortSignal; onEvent?: ((event: EngineEvent) => void) | undefined },
+) => Promise<HookAgentResult>;
 
 export interface SendOptions {
   signal?: AbortSignal | undefined;
@@ -205,9 +217,9 @@ export class Session {
   readonly #cwd: string;
   readonly #changes: FileChanges;
   readonly #ownsChanges: boolean;
-  readonly #runAgent: HookContext['runAgent'];
-  /** Sub-agent events of agents a hook ran, until the loop passes them on. */
-  readonly #pendingHookEvents: EngineEventBody[] = [];
+  readonly #runAgent: HookRunAgent | undefined;
+  /** Sub-agent events of agents a hook runs, until the loop passes them on. */
+  readonly #hookEvents = new HookEvents();
   /** Told to the model with the next input, e.g. that files were rewound. */
   readonly #notes: string[] = [];
   readonly #intent: string | undefined;
@@ -528,7 +540,7 @@ export class Session {
         compactAt: this.#compactAt,
         intent: this.#intent,
         beforeEnd: () => this.#commitLinks(base, started),
-        hookEvents: () => this.#takeHookEvents(),
+        hookEvents: this.#hookEvents,
         stopCheck: async () =>
           this.#unfinishedReminder() ?? this.#verifyReminder() ?? (await this.#planReminder()),
         reasoningEffort: () => this.#reasoningEffort,
@@ -695,17 +707,32 @@ export class Session {
 
   /**
    * A hook's agent runs (a tester or reviewer in `beforeStop`), recorded as sub-agent events so
-   * the user and the session log see that they ran and what they said; the loop passes them on
-   * once the hook returns (`hookEvents`).
+   * the user and the session log see that they run and what they said; the loop passes them on
+   * as they come (`hookEvents`). Its model calls are passed on as this session's, so they count
+   * into the run's cost, the session's and the cost limit (they did not: a $0.40 tester run
+   * showed as nothing). None starts once the run was interrupted.
    */
-  #shownRuns(runAgent: NonNullable<HookContext['runAgent']>): HookContext['runAgent'] {
+  #shownRuns(runAgent: HookRunAgent): HookRunAgent {
     let count = 0;
-    return async (name, task) => {
+    return async (name, task, { signal }) => {
+      signal.throwIfAborted();
       const childAgentId = `${name}-hook-${++count}`;
-      this.#pendingHookEvents.push({ type: 'subagent.start', childAgentId, name, task });
-      const result = await runAgent(name, task);
+      this.#hookEvents.push({ type: 'subagent.start', childAgentId, name, task });
+      const result = await runAgent(name, task, {
+        signal,
+        onEvent: (event) => {
+          if (event.type !== 'usage') return;
+          const { usage, model, costUsd } = event;
+          this.#hookEvents.push({
+            type: 'usage',
+            usage,
+            model,
+            ...(costUsd !== undefined && { costUsd }),
+          });
+        },
+      });
       const summary = result.text.trim().split('\n').at(-1)?.trim();
-      this.#pendingHookEvents.push({
+      this.#hookEvents.push({
         type: 'subagent.end',
         childAgentId,
         name,
@@ -719,18 +746,17 @@ export class Session {
     };
   }
 
-  #takeHookEvents(): EngineEventBody[] {
-    return this.#pendingHookEvents.splice(0);
-  }
-
   #hookContext(signal: AbortSignal): HookContext {
+    const runAgent = this.#runAgent;
     return {
       sessionId: this.id,
       agentId: this.agentId,
       model: this.#model.id,
       workspace: this.#workspace,
       signal,
-      ...(this.#runAgent && { runAgent: this.#runAgent }),
+      ...(runAgent && {
+        runAgent: (name: string, task: string) => runAgent(name, task, { signal }),
+      }),
     };
   }
 

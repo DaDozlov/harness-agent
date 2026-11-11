@@ -25,6 +25,11 @@ export interface HeawConfig {
     type?: 'local' | 'docker';
     /** Local: the shell for run_command, e.g. `pwsh` or a path to bash. `HEAW_SHELL` takes precedence. */
     shell?: string;
+    /**
+     * Local: variables commands get although they look like secrets or the config reads them,
+     * e.g. `['GH_TOKEN']`. Otherwise those are kept from commands, the model's API key included.
+     */
+    passEnv?: string[];
   } & DockerWorkspaceConfig;
   /** Built-in toolsets. Default: all of them (`http` only does something with `http.apis`). */
   toolsets?: ToolsetName[];

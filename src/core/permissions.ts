@@ -276,6 +276,17 @@ export class PermissionPolicy {
   }
 
   /**
+   * Whether a rule the user wrote (or gave in advance) allows exactly this subject: not a mode,
+   * nor an answer given for a hostname without seeing where it leads. For `web_fetch` of an
+   * internal site, e.g. `web_fetch(wiki.corp)`.
+   */
+  allowsByRule(toolName: string, subject: Subject): boolean {
+    return Boolean(
+      ruleFor(this.#preapproved, toolName, subject) ?? ruleFor(this.#allow, toolName, subject),
+    );
+  }
+
+  /**
    * A stricter view of this policy, e.g. for a sub-agent: every call needs this policy's
    * permission and also passes the restriction. It can only deny or ask more, never less, and
    * it follows this policy as it changes (mode switches, session approvals).
@@ -368,6 +379,10 @@ class RestrictedPolicy extends PermissionPolicy {
 
   override allowRulesFor(toolName: string): string[] {
     return this.#base.allowRulesFor(toolName);
+  }
+
+  override allowsByRule(toolName: string, subject: Subject): boolean {
+    return this.#base.allowsByRule(toolName, subject);
   }
 }
 
@@ -469,6 +484,15 @@ function isSimple(command: string): boolean {
   return !SUBSTITUTION.test(command) && !SHELL_SYNTAX.test(command.replace(QUOTED, "''"));
 }
 
+/**
+ * Whether a command sends output into a file (`> f`, `>> f`, `&> f`), which can change any
+ * file, protected ones included. `2>&1` and `> /dev/null` do not count.
+ */
+export function writesToFile(command: string): boolean {
+  const text = command.replace(QUOTED, "''").replace(HARMLESS_REDIRECT, '');
+  return /(^|[^<])>/.test(text);
+}
+
 /** Output piped into a filter such as `tail -50` adds nothing that needs allowing. */
 function isFilter(command: Command): boolean {
   const text = command.text.replace(HARMLESS_REDIRECT, '');
@@ -499,6 +523,9 @@ function allowedEach(
     if (isFilter(command)) continue;
     const one = allowOne({ type: 'text', value: command.text });
     if (!one) return undefined;
+    // `run_command(npm test*)` must not cover `npm test > heaw.config.ts`: output into a file
+    // is allowed only by a rule that writes the redirect out itself.
+    if (writesToFile(command.text) && !one.text.includes('>')) return undefined;
     found.push(one);
   }
   return found.length ? found : undefined;

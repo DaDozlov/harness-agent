@@ -1,0 +1,3 @@
+HOME=/home/app
+NODE_ENV=development
+PATH=/usr/local/bin:/usr/bin

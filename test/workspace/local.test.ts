@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { WorkspaceError } from '../../src/core/workspace.js';
@@ -30,6 +30,23 @@ describe('LocalWorkspace paths', () => {
     expect(workspace.displayPath('.')).toBe('.');
     expect(workspace.displayPath('../x')).not.toMatch(/^\.\./);
   });
+
+  it('follows links: none leads out, and a protected folder is seen behind one', async () => {
+    const workspace = await tempWorkspace();
+    const elsewhere = await tempWorkspace();
+    await elsewhere.writeFile('secret.txt', 'outside');
+    await workspace.writeFile('.git/hooks/README', '');
+    // Directory junctions need no extra rights on Windows; elsewhere they are symlinks.
+    await symlink(elsewhere.root, join(workspace.root, 'out'), 'junction');
+    await symlink(join(workspace.root, '.git'), join(workspace.root, 'hooks-link'), 'junction');
+
+    expect(() => workspace.resolve('out/secret.txt')).toThrow(/leads outside the workspace/);
+    await expect((async () => workspace.readFile('out/secret.txt'))()).rejects.toThrow(
+      WorkspaceError,
+    );
+    expect(workspace.displayPath('hooks-link/hooks/pre-commit')).toBe('.git/hooks/pre-commit');
+    expect(workspace.displayPath('new/file.ts')).toBe('new/file.ts');
+  });
 });
 
 describe('LocalWorkspace files', () => {
@@ -55,6 +72,34 @@ describe('LocalWorkspace exec', () => {
     expect(ok).toMatchObject({ exitCode: 0, timedOut: false });
     expect(ok.output.trim()).toBe('hello');
     expect(failed.exitCode).toBe(3);
+  });
+
+  it('keeps secrets from commands, unless told to pass them on', async () => {
+    const workspace = await tempWorkspace();
+    const show = (name: string) => `node -e "console.log(process.env.${name} ?? 'none')"`;
+    const socket = process.env.SSH_AUTH_SOCK;
+    Object.assign(process.env, {
+      HEAW_TEST_API_KEY: 'sk-test-123456',
+      HEAW_TEST_PLAIN: 'visible',
+      SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK ?? '/tmp/agent.sock',
+    });
+    try {
+      expect((await workspace.exec(show('HEAW_TEST_API_KEY'))).output.trim()).toBe('none');
+      expect((await workspace.exec(show('HEAW_TEST_PLAIN'))).output.trim()).toBe('visible');
+      // An SSH agent's socket looks like a secret by name, but git push needs it.
+      expect((await workspace.exec(show('SSH_AUTH_SOCK'))).output.trim()).not.toBe('none');
+
+      const passing = new LocalWorkspace(workspace.root, {
+        hideEnv: (name) => name === 'HEAW_TEST_PLAIN',
+      });
+      expect((await passing.exec(show('HEAW_TEST_API_KEY'))).output.trim()).toBe('sk-test-123456');
+      expect((await passing.exec(show('HEAW_TEST_PLAIN'))).output.trim()).toBe('none');
+      await passing.dispose();
+    } finally {
+      delete process.env.HEAW_TEST_API_KEY;
+      delete process.env.HEAW_TEST_PLAIN;
+      if (socket === undefined) delete process.env.SSH_AUTH_SOCK;
+    }
   });
 
   it('captures stderr and runs in the given folder', async () => {

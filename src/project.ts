@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import type { RunLimits } from './core/loop.js';
 import type { PermissionMode } from './core/permissions.js';
-import { Redactor, referencedVariables, secretsFromEnv } from './core/redact.js';
+import { isSecretName, Redactor, referencedVariables, secretsFromEnv } from './core/redact.js';
 import type { Workspace } from './core/workspace.js';
 import { loadInstructions } from './config/instructions.js';
 import type { HeawConfig } from './config/define.js';
@@ -13,6 +13,7 @@ import { loadAgentDefinitions } from './agents/definitions.js';
 import { createEngine, type Engine, type EngineOptions } from './engine.js';
 import { loadMcpServers } from './mcp/config.js';
 import { MCP_CREDENTIALS_DIR } from './mcp/oauth.js';
+import { MCP_PINS_FILE } from './mcp/pins.js';
 import { telemetryFromEnv, type TelemetryOptions } from './observability/otel.js';
 import { sessionReportTool } from './observability/session-report.js';
 import type { Env } from './providers/registry.js';
@@ -63,6 +64,12 @@ export interface Project {
   createWorkspace: (root: string) => Workspace;
 }
 
+/** What an unattended bypass run is told about its workspace. */
+const IN_DOCKER =
+  "Unattended run in bypass mode: commands run in a Docker container, where they cannot change heaw's " +
+  "or git's files or see your environment. To run them on this machine instead, set workspace: { type: 'local' } " +
+  'in heaw.config.ts.';
+
 /** No model is configured anywhere. */
 export class NoModelError extends Error {
   override readonly name = 'NoModelError';
@@ -89,13 +96,21 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     );
   }
 
+  // Unattended, in bypass mode, any command runs, and nothing confines a local one (docs/DESIGN.md
+  // §8): such a run uses the Docker workspace unless the config chooses `type: 'local'` itself.
+  const unattendedBypass =
+    options.interactive === false &&
+    (options.mode ?? config.permissions?.mode) === 'bypass' &&
+    config.workspace?.type === undefined;
   const docker =
-    config.workspace?.type === 'docker'
-      ? await dockerOptions(config.workspace, env, projectRoot)
+    config.workspace?.type === 'docker' || unattendedBypass
+      ? await dockerOptions({ ...config.workspace, type: 'docker' }, env, projectRoot)
       : undefined;
   const shell = env.HEAW_SHELL ?? config.workspace?.shell;
   const createWorkspace = (root: string): Workspace =>
-    docker ? new DockerWorkspace(root, docker) : localWorkspace(root, shell, env);
+    docker
+      ? new DockerWorkspace(root, docker)
+      : localWorkspace(root, shell, env, (name) => hiddenFromCommands(name));
   const home = heawHome(env);
   const readMcp = async (servers: HeawConfig['mcpServers']) =>
     loadMcpServers({
@@ -106,9 +121,12 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     });
   const mcpServers = await readMcp(config.mcpServers);
   // Secrets the config reads, and those with secret-looking names, never reach logs or traces.
-  const redactor = new Redactor(
-    secretsFromEnv(env, referencedVariables([config, mcpServers.map((entry) => entry.config)])),
-  );
+  const configVariables = referencedVariables([config, mcpServers.map((entry) => entry.config)]);
+  const redactor = new Redactor(secretsFromEnv(env, configVariables));
+  // Nor commands, which would otherwise see the model's key: unless the config passes them on.
+  const passed = new Set(config.workspace?.passEnv ?? []);
+  const hiddenFromCommands = (name: string) =>
+    !passed.has(name) && (isSecretName(name) || configVariables.has(name));
   const redact = (text: string) => redactor.redact(text);
   const mode = options.mode ?? config.permissions?.mode;
   const save = options.save !== false && config.sessions?.save !== false;
@@ -176,6 +194,7 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
           return readMcp(again.config.mcpServers);
         },
         credentialsDir: join(home, MCP_CREDENTIALS_DIR),
+        pinsFile: join(home, MCP_PINS_FILE),
         ...(config.mcpTools && { tools: config.mcpTools }),
       },
     }),
@@ -183,7 +202,7 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
   return {
     options: engineOptions,
     loaded,
-    warnings: [...agents.problems, ...skills.problems],
+    warnings: [...agents.problems, ...skills.problems, ...(unattendedBypass ? [IN_DOCKER] : [])],
     createWorkspace,
   };
 }
@@ -249,9 +268,15 @@ function withTelemetry(
   };
 }
 
-function localWorkspace(root: string, shell: string | undefined, env: Env): LocalWorkspace {
+function localWorkspace(
+  root: string,
+  shell: string | undefined,
+  env: Env,
+  hideEnv: (name: string) => boolean,
+): LocalWorkspace {
   return new LocalWorkspace(root, {
     shell: detectShell({ ...env, ...(shell && { HEAW_SHELL: shell }) }),
+    hideEnv,
   });
 }
 

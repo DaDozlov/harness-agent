@@ -8,3 +8,5 @@ evals/fixtures/
 **/*.md
 # Build output in reference solutions: compared byte for byte with what the build writes
 evals/solutions/*/files/out/
+# A generated report: compared as it is
+evals/baseline.json

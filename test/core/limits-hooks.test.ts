@@ -167,6 +167,38 @@ describe('usage and cost', () => {
 });
 
 describe('run limits', () => {
+  it('asks for a report without tools when the turn limit stops the agent mid-work', async () => {
+    const { model, session } = await setup(
+      [
+        callEcho('1'),
+        callEcho('2'),
+        // A provider that ignores the tool choice still calls one: dropped, nothing would answer.
+        {
+          text: 'Did 1 and 2; 3 is left.',
+          toolCalls: [{ name: 'echo', args: { text: '3' } }],
+        },
+      ],
+      { limits: { maxTurns: 2 } },
+    );
+
+    const events = await collect(session.send('go'));
+
+    expect(model.requests).toHaveLength(3);
+    const report = model.requests[2]!;
+    expect(report.toolChoice).toBe('none');
+    expect(report.tools?.length).toBeGreaterThan(0);
+    expect(textOf(report.messages.at(-1)!)).toContain(
+      '[heaw: this message has reached its limit of 2 turns, so no more tools can be called.',
+    );
+    expect(session.messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Did 1 and 2; 3 is left.' }],
+    });
+    expect(session.messages.at(-1)?.content).toHaveLength(1);
+    expect(ofType(events, 'tool.start')).toHaveLength(2);
+    expect(runEnd(events)).toMatchObject({ stopReason: 'max_turns', turns: 2 });
+  });
+
   it('stops at the token limit', async () => {
     const { session } = await setup([callEcho('1'), callEcho('2'), callEcho('3')], {
       limits: { maxTokens: 1_000 },
@@ -353,6 +385,24 @@ describe('hooks', () => {
       'A check before finishing reported:\n\nTests fail: 1 failing',
     );
     expect(runEnd(events)).toMatchObject({ stopReason: 'end_turn', turns: 2 });
+  });
+
+  it('stops waiting for a hook that ignores the signal when the run is interrupted', async () => {
+    const controller = new AbortController();
+    const hooks: Hooks = {
+      // Like tests run without the signal: Esc during the check.
+      beforeStop: () => {
+        controller.abort();
+        return new Promise<undefined>(() => {});
+      },
+    };
+    const { session } = await setup([{ text: 'Done!' }], { hooks });
+
+    const events = await collect(session.send('fix', { signal: controller.signal }));
+
+    expect(runEnd(events)).toMatchObject({ stopReason: 'aborted', turns: 1 });
+    // The session can go on.
+    expect(session.running).toBe(false);
   });
 
   it('runs sessionEnd on close, only for a session that ran', async () => {

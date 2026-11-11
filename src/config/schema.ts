@@ -88,6 +88,7 @@ const configSchema = z
       .object({
         type: z.enum(['local', 'docker']).optional(),
         shell: z.string().min(1).optional(),
+        passEnv: z.array(z.string().regex(/^[A-Za-z_]\w*$/, 'expected a variable name')).optional(),
         image: z.string().min(1).optional(),
         network: z.string().min(1).optional(),
         cpus: z.number().positive().or(z.string().min(1)).optional(),

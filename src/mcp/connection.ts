@@ -11,6 +11,7 @@ import {
 } from '@modelcontextprotocol/client';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import type { Env } from '../providers/registry.js';
+import type { McpPins } from './pins.js';
 import {
   expandRecord,
   expandValue,
@@ -35,6 +36,8 @@ export interface McpConnectionOptions {
   /** Supplies OAuth for servers configured with `oauth`, given the server's expanded URL. */
   authProvider?: ((entry: McpServerEntry, url: URL) => OAuthClientProvider | undefined) | undefined;
   onChange?: (() => void) | undefined;
+  /** Tools as first seen; changed or new ones are held back (`McpPins`). Default: none kept. */
+  pins?: McpPins | undefined;
 }
 
 /** One configured MCP server: connects, lists its tools, calls them. */
@@ -43,6 +46,8 @@ export class McpConnection {
   status: McpStatus = 'connecting';
   error: string | undefined;
   tools: McpTool[] = [];
+  /** Tools that changed, or were added, since the user connected the server: not offered. */
+  held = new Set<string>();
   instructions: string | undefined;
   transport: 'stdio' | 'http' | 'sse';
   readonly #options: McpConnectionOptions;
@@ -63,6 +68,20 @@ export class McpConnection {
     return this.entry.name;
   }
 
+  /** Per server and the file that configured it: a project's and an agent's namesakes differ. */
+  get #pinKey(): string {
+    return `${this.entry.source}#${this.name}`;
+  }
+
+  /** Accepts the tools as they are now, the held ones included. False when not connected. */
+  trust(): boolean {
+    if (this.status !== 'connected' || !this.#options.pins) return false;
+    this.#options.pins.trust(this.#pinKey, this.tools);
+    this.held = new Set();
+    this.#options.onChange?.();
+    return true;
+  }
+
   async connect(): Promise<void> {
     if (this.entry.config.disabled) {
       this.#set('disabled');
@@ -71,6 +90,7 @@ export class McpConnection {
     try {
       await this.#connectWithFallback();
       this.tools = await listAllTools(this.#client!);
+      this.held = this.#options.pins?.review(this.#pinKey, this.tools) ?? new Set();
       this.instructions = this.#client!.getInstructions()?.trim() || undefined;
       this.#set('connected');
     } catch (error) {

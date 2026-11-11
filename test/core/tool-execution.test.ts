@@ -144,6 +144,29 @@ describe('tool execution', () => {
     ]);
   });
 
+  it("points a denied command to the project's script that runs it, when that is allowed", async () => {
+    const { model, session, workspace } = await setup(
+      [
+        // A line of several commands: the one that is a script is found among them.
+        {
+          toolCalls: [call('run_command', { command: 'node  scripts/clean.mjs && npm run build' })],
+        },
+        { text: 'ok' },
+      ],
+      { permissions: { allow: ['run_command(npm run *)'] } },
+    );
+    await workspace.writeFile(
+      'package.json',
+      JSON.stringify({ scripts: { clean: 'node scripts/clean.mjs', build: 'node b.mjs' } }),
+    );
+
+    await collect(session.send('Clean up'));
+
+    expect(JSON.stringify(lastToolResults(model))).toContain(
+      'This is the project\'s script \\"clean\\": run it as `npm run clean`, which is allowed.',
+    );
+  });
+
   it('asks for approval and runs the call once it is allowed', async () => {
     const { workspace, session } = await setup(
       [{ toolCalls: [call('write_file', { path: 'a.txt', content: 'x' })] }, { text: 'Done.' }],

@@ -139,8 +139,9 @@ export const COMMANDS: SlashCommand[] = [
   },
   {
     name: 'mcp',
-    usage: '[reload | login <server>]',
-    description: 'Show MCP servers, reload them after .mcp.json changed, or log in to one',
+    usage: '[reload | login <server> | trust <server>]',
+    description:
+      'Show MCP servers, reload them after .mcp.json changed, log in to one, or accept its changed tools',
     async run(args, { engine, print, refresh, openUrl = openBrowser }) {
       if (args === 'reload') {
         print('Reloading MCP servers…');
@@ -164,9 +165,18 @@ export const COMMANDS: SlashCommand[] = [
         }
         return;
       }
+      if (option === 'trust' && server) {
+        try {
+          print(engine.trustMcp(server));
+          refresh();
+        } catch (error) {
+          print((error as Error).message, 'error');
+        }
+        return;
+      }
       if (args) {
         return print(
-          `Unknown option "${args}". Use /mcp, /mcp reload or /mcp login <server>.`,
+          `Unknown option "${args}". Use /mcp, /mcp reload, /mcp login <server> or /mcp trust <server>.`,
           'error',
         );
       }

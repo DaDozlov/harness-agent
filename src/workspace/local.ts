@@ -1,7 +1,8 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { rgPath } from '@vscode/ripgrep';
 import {
   type DirEntry,
@@ -19,8 +20,15 @@ import {
   MAX_CAPTURE_CHARS,
   OutputBuffer,
 } from './exec.js';
+import { isSecretName } from '../core/redact.js';
 import { killMarked, killTree } from './process.js';
 import { detectShell, type ShellSpec } from './shell.js';
+
+export interface LocalWorkspaceOptions {
+  shell?: ShellSpec;
+  /** Variables commands do not get. Default: those whose name looks like a secret. */
+  hideEnv?: (name: string) => boolean;
+}
 
 /** Runs tools directly on this machine, confined to `root` (docs/DESIGN.md §4.12). */
 export class LocalWorkspace implements Workspace {
@@ -33,10 +41,26 @@ export class LocalWorkspace implements Workspace {
   /** Stops still going (taskkill, sweeps), which `dispose` waits for. */
   readonly #stopping = new Set<Promise<void>>();
 
-  constructor(root: string, options: { shell?: ShellSpec } = {}) {
+  /** Variables kept from commands: heaw's credentials and anything that looks like a secret. */
+  readonly #hidden: (name: string) => boolean;
+
+  constructor(root: string, options: LocalWorkspaceOptions = {}) {
     this.root = resolve(root);
     this.#shell = options.shell ?? detectShell();
     this.shell = this.#shell.name;
+    this.#hidden = options.hideEnv ?? isSecretName;
+  }
+
+  /**
+   * The environment commands run with: this process's, without its secrets. A command the agent
+   * runs (or a test it wrote) would otherwise see the model's API key and could send it out.
+   */
+  #commandEnv(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {};
+    for (const [name, value] of Object.entries(process.env)) {
+      if (!this.#hidden(name)) env[name] = value;
+    }
+    return env;
   }
 
   resolve(path: string): string {
@@ -44,13 +68,52 @@ export class LocalWorkspace implements Workspace {
     if (this.#isOutside(absolute)) {
       throw new WorkspaceError(`"${path}" is outside the workspace (${this.root}).`);
     }
+    // A link inside the workspace can lead out of it: what counts is where it really goes.
+    const real = this.#real(absolute);
+    if (outside(this.#realRoot(), real)) {
+      throw new WorkspaceError(
+        `"${path}" leads outside the workspace through a link (to ${real}).`,
+      );
+    }
     return absolute;
   }
 
+  /**
+   * Relative to the root, with forward slashes: where the path really leads, so that rules see
+   * `.git/hooks/pre-commit` for a write through a link to `.git`.
+   */
   displayPath(path: string): string {
     const absolute = resolve(this.root, path);
-    const shown = this.#isOutside(absolute) ? absolute : relative(this.root, absolute) || '.';
+    if (this.#isOutside(absolute)) return absolute.split(sep).join('/');
+    const real = this.#real(absolute);
+    const root = this.#realRoot();
+    const shown = outside(root, real)
+      ? relative(this.root, absolute) || '.'
+      : relative(root, real) || '.';
     return shown.split(sep).join('/');
+  }
+
+  #rootReal: string | undefined;
+
+  #realRoot(): string {
+    if (this.#rootReal === undefined) this.#rootReal = realOrSelf(this.root);
+    return this.#rootReal;
+  }
+
+  /** `absolute` with its links followed, as far as it exists (a new file's folder, say). */
+  #real(absolute: string): string {
+    const missing: string[] = [];
+    let current = absolute;
+    for (;;) {
+      try {
+        return join(realpathSync.native(current), ...missing.reverse());
+      } catch {
+        const parent = dirname(current);
+        if (parent === current) return absolute;
+        missing.push(basename(current));
+        current = parent;
+      }
+    }
   }
 
   readFile(path: string): Promise<Buffer> {
@@ -92,7 +155,7 @@ export class LocalWorkspace implements Workspace {
     const execId = randomUUID();
     const child = spawn(this.#shell.file, this.#shell.args(command), {
       cwd: this.resolve(options.cwd ?? '.'),
-      env: { ...process.env, ...COMMAND_ENV, HEAW_EXEC_ID: execId },
+      env: { ...this.#commandEnv(), ...COMMAND_ENV, HEAW_EXEC_ID: execId },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       // Own process group on POSIX, so the whole tree can be stopped (see killTree).
@@ -152,7 +215,19 @@ export class LocalWorkspace implements Workspace {
   }
 
   #isOutside(absolute: string): boolean {
-    const path = relative(this.root, absolute);
-    return path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path);
+    return outside(this.root, absolute);
+  }
+}
+
+function outside(root: string, absolute: string): boolean {
+  const path = relative(root, absolute);
+  return path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path);
+}
+
+function realOrSelf(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
   }
 }

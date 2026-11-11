@@ -13,8 +13,9 @@ export interface FolderContextOptions {
   onSkills?: () => void;
 }
 
-/** Folders whose instructions belong to someone else, or to heaw itself. */
-const SKIPPED = /(^|\/)(node_modules|\.git|\.heaw)(\/|$)/;
+/** Folders whose instructions belong to someone else (dependencies, vendored code), or to heaw. */
+const SKIPPED =
+  /(^|\/)(node_modules|\.git|\.heaw|vendor|third[_-]party|external|\.?venv|site-packages|bower_components|Pods)(\/|$)/;
 
 /**
  * Instructions and skills of the folders the agent works in (docs/DESIGN.md §4.6): the first
@@ -65,16 +66,33 @@ function ancestors(folder: string): string[] {
   return segments.map((_, index) => segments.slice(0, index + 1).join('/'));
 }
 
+/**
+ * Whether the project's git repository has files at `path`. Instructions come from the project
+ * itself, not from a repository cloned into a subfolder or a file nobody committed. Outside a
+ * git repository nothing can be told apart, so everything counts.
+ */
+async function tracked(workspace: Workspace, path: string): Promise<boolean> {
+  const quoted = `'${path.replace(/'/g, "'\\''")}'`;
+  const result = await workspace
+    .exec(`git ls-files -- ${quoted}`, { timeoutMs: 10_000 })
+    .catch(() => undefined);
+  if (!result || result.exitCode !== 0) return true;
+  return result.output.trim().length > 0;
+}
+
 async function contextOf(
   dir: string,
   workspace: Workspace,
   options: FolderContextOptions,
 ): Promise<string[]> {
   const parts: string[] = [];
-  const raw = await workspace
-    .readFile(`${dir}/AGENTS.md`)
-    .then((buffer) => buffer.toString('utf8'))
-    .catch(() => undefined);
+  if (!(await tracked(workspace, dir))) return parts;
+  const raw = (await tracked(workspace, `${dir}/AGENTS.md`))
+    ? await workspace
+        .readFile(`${dir}/AGENTS.md`)
+        .then((buffer) => buffer.toString('utf8'))
+        .catch(() => undefined)
+    : undefined;
   const instructions = raw === undefined ? '' : cleanInstructions(raw);
   if (instructions) {
     parts.push(`[${dir}/AGENTS.md: instructions for files under ${dir}/]\n${instructions}`);

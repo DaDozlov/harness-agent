@@ -2,16 +2,24 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { compactHistory, type ContextMeter, usableWindow } from './context.js';
 import { isAbortError, ModelError, serializeError } from './errors.js';
 import type { EngineEvent, EngineEventBody, StopReason } from './events.js';
-import { type HookContext, type HookFailure, hookFailureEvent, type HookRunner } from './hooks.js';
+import {
+  type HookContext,
+  type HookEvents,
+  type HookFailure,
+  hookFailureEvent,
+  type HookRunner,
+} from './hooks.js';
 import {
   type AssistantMessage,
+  heawNote,
   type Message,
   toolCallsOf,
   userMessage,
+  withoutToolCalls,
   withRecentImages,
 } from './messages.js';
 import type { FinishReason, ModelClient, ModelRequest, ToolSpec } from './model.js';
-import { failureKey } from './stuck.js';
+import { failureKey, stuckNote } from './stuck.js';
 import { executeToolCalls, type ToolRuntime } from './tool-execution.js';
 import { forgetSeen } from './tools.js';
 import { addUsage, costOf, emptyUsage, type Usage } from './usage.js';
@@ -37,6 +45,11 @@ export const IMAGES_KEPT = 3;
 
 /** The share of a limit after which the agent is asked to wrap up. */
 export const NEAR_LIMIT = 0.8;
+/**
+ * How long an interrupted run waits for a hook to finish: an agent the hook started stops at
+ * once and its end is shown with the run; a hook that ignores its signal is left behind.
+ */
+export const HOOK_GRACE_MS = 1_500;
 
 /** Limits per run, i.e. per user input (docs/DESIGN.md §4.1). */
 export interface RunLimits {
@@ -84,8 +97,8 @@ export interface LoopOptions {
   stopCheck?: (() => Promise<string | undefined> | string | undefined) | undefined;
   /** Events to add before `run.end`, e.g. links to the commits the run made. */
   beforeEnd?: (() => Promise<EngineEventBody[]>) | undefined;
-  /** Events recorded while a hook ran (agents it started), taken after each hook. */
-  hookEvents?: (() => EngineEventBody[]) | undefined;
+  /** Events recorded while a hook runs (agents it starts), passed on as they come. */
+  hookEvents?: HookEvents | undefined;
 }
 
 export interface RunResult {
@@ -128,6 +141,8 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
   let thinkHarder = false;
   // File writes when the checks before finishing last passed with a note.
   let passedAt: number | undefined;
+  // heaw's notes for the agent about the last tool calls, sent after their results.
+  const notes: string[] = [];
 
   function* account(callUsage: Usage): Generator<EngineEvent> {
     usage = addUsage(usage, callUsage);
@@ -142,6 +157,51 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
   }
   function* reported(failures: HookFailure[]): Generator<EngineEvent> {
     for (const failure of failures) yield stamp(hookFailureEvent(failure));
+  }
+  /**
+   * Waits for a hook, passing on what it records meanwhile (a tester it started, which can take
+   * minutes). An interruption ends the wait even when the hook ignores its signal, e.g. tests
+   * run without it: the hook gets a moment to finish, then the run stops without its result.
+   */
+  async function* waitFor<T>(hook: Promise<T>): AsyncGenerator<EngineEvent, T> {
+    const done = hook.then((value) => ({ value }));
+    const interrupted = whenAborted(signal);
+    try {
+      for (;;) {
+        const next = await Promise.race([
+          done,
+          options.hookEvents?.arrived().then(() => undefined) ?? done,
+          interrupted.promise,
+        ]);
+        yield* hookEventsSoFar();
+        if (next) return next.value;
+        if (signal.aborted) {
+          const grace = new AbortController();
+          await Promise.race([
+            done,
+            sleep(HOOK_GRACE_MS, undefined, { signal: grace.signal, ref: false }).catch(() => {}),
+          ]);
+          grace.abort();
+          yield* hookEventsSoFar();
+          throw new DOMException('The run was interrupted.', 'AbortError');
+        }
+      }
+    } finally {
+      interrupted.dispose();
+    }
+  }
+  /**
+   * What hooks recorded so far. The model calls of an agent a hook started (a tester) count into
+   * this run, so its cost shows and the cost limit sees it.
+   */
+  function* hookEventsSoFar(): Generator<EngineEvent> {
+    for (const body of options.hookEvents?.take() ?? []) {
+      if (body.type === 'usage') {
+        usage = addUsage(usage, body.usage);
+        if (body.costUsd !== undefined) costUsd = (costUsd ?? 0) + body.costUsd;
+      }
+      yield stamp(body);
+    }
   }
   /** What sub-agents may still spend: a run's budget includes its sub-agents. */
   const remaining = () => ({
@@ -164,7 +224,10 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         usage = addUsage(usage, event.usage);
         if (event.costUsd !== undefined) costUsd = (costUsd ?? 0) + event.costUsd;
       }
-      if (event.type === 'stuck' && event.agentId === options.agentId) thinkHarder = true;
+      if (event.type === 'stuck' && event.agentId === options.agentId) {
+        thinkHarder = true;
+        notes.push(stuckNote(event));
+      }
       yield event;
     }
   }
@@ -229,7 +292,7 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
     if (limits.maxCostUsd !== undefined && !model.capabilities.pricing) {
       throw new Error(unknownPriceMessage(model.id));
     }
-    const prompt = await hooks.userPrompt(hookContext, options.input);
+    const prompt = yield* waitFor(hooks.userPrompt(hookContext, options.input));
     yield* reported(prompt.failures);
     if (prompt.block !== undefined) {
       yield stamp({ type: 'hook', hook: 'userPrompt', message: prompt.block });
@@ -246,6 +309,7 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
     while (true) {
       if (signal.aborted) return abortReason();
       const limit = limitReached(limits, turns, usage, costUsd);
+      if (limit === 'max_turns') yield* reportAtLimit();
       if (limit) return limit;
       turns++;
       yield stamp({ type: 'turn.start', turn: turns });
@@ -255,7 +319,7 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
       thinkHarder = false;
       let request = buildRequest(options, effort);
       if (yield* compactIfNeeded(request)) request = buildRequest(options, effort);
-      const adjusted = await hooks.beforeModelCall(hookContext, request, turns);
+      const adjusted = yield* waitFor(hooks.beforeModelCall(hookContext, request, turns));
       yield* reported(adjusted.failures);
       request = adjusted.request;
 
@@ -271,7 +335,9 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
       addMessage(outcome.message);
       yield stamp({ type: 'message.complete', message: outcome.message });
       yield* account(outcome.usage);
-      const after = await hooks.afterModelCall(hookContext, outcome.message, outcome.usage, turns);
+      const after = yield* waitFor(
+        hooks.afterModelCall(hookContext, outcome.message, outcome.usage, turns),
+      );
       yield* reported(after.failures);
 
       const toolCalls = toolCallsOf(outcome.message);
@@ -290,8 +356,9 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         // answer with what they found, and running them again would find the same.
         const writes = options.tools.changes?.writes ?? 0;
         if (passedAt === writes) return 'end_turn';
-        const verdict = await hooks.beforeStop(hookContext, outcome.message, turns, edited);
-        for (const body of options.hookEvents?.() ?? []) yield stamp(body);
+        const verdict = yield* waitFor(
+          hooks.beforeStop(hookContext, outcome.message, turns, edited),
+        );
         yield* reported(verdict.failures);
         if (!verdict.feedback && verdict.note) {
           passedAt = writes;
@@ -314,17 +381,48 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
       const results = yield* countingSubagents(
         executeToolCalls(toolCalls, options.tools, stamp, signal, remaining),
       );
-      // Once per run, near a limit: ask the agent to wrap up while it still can. Added to the
-      // last result, which every provider accepts after tool calls.
+      // Once per run, near a limit: ask the agent to wrap up while it still can.
       const minutes = (Date.now() - startedAt) / 60_000;
       const near = warned ? undefined : nearLimit(limits, { turns, usage, costUsd, minutes });
       if (near) {
         warned = true;
         yield stamp({ type: 'limit.near', ...near });
-        const last = results.at(-1);
-        if (last) last.output += `\n\n[${nearLimitNote(near)}]`;
+        notes.push(nearLimitNote(near));
       }
       addMessage({ role: 'tool', content: results });
+      if (notes.length) addMessage(heawNote(notes.splice(0)));
+    }
+  }
+
+  /**
+   * At the turn limit, with something the agent has not answered (tool results, a check's
+   * findings): one more model call, without tool calls, for its report. A sub-agent or a tester
+   * that just stopped returned nothing, and a stopped build left the user without a word on
+   * what is done.
+   */
+  async function* reportAtLimit(): AsyncGenerator<EngineEvent, void> {
+    if (options.messages.at(-1)?.role === 'assistant') return;
+    addMessage(heawNote([turnLimitNote(limits.maxTurns)]));
+    let request: ModelRequest = { ...buildRequest(options), toolChoice: 'none' };
+    if (yield* compactIfNeeded(request)) request = { ...buildRequest(options), toolChoice: 'none' };
+    try {
+      request = (yield* waitFor(hooks.beforeModelCall(hookContext, request, turns))).request;
+      const outcome = yield* callModel(request, options, signal);
+      if (outcome.kind === 'aborted') return;
+      options.meter.calibrate(request, outcome.usage.inputTokens);
+      // A provider that ignores the tool choice may still call one; nothing will answer it.
+      const message = withoutToolCalls(outcome.message);
+      yield* account(outcome.usage);
+      if (!message.content.length) return;
+      addMessage(message);
+      yield stamp({ type: 'message.complete', message });
+      const after = yield* waitFor(
+        hooks.afterModelCall(hookContext, message, outcome.usage, turns),
+      );
+      yield* reported(after.failures);
+    } catch (error) {
+      // The run stopped at its limit either way.
+      if (signal.aborted || isAbortError(error)) throw error;
     }
   }
 
@@ -345,11 +443,22 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
     }
   }
 
-  for (const body of options.hookEvents?.() ?? []) yield stamp(body);
+  yield* hookEventsSoFar();
   for (const body of (await options.beforeEnd?.().catch(() => [])) ?? []) yield stamp(body);
   const cost = costUsd === undefined ? {} : { costUsd };
   yield stamp({ type: 'run.end', stopReason, usage, turns, ...cost });
   return { stopReason, usage, turns, ...cost };
+}
+
+/** Resolves (to nothing) when the signal aborts; `dispose` stops listening. */
+function whenAborted(signal: AbortSignal): { promise: Promise<undefined>; dispose: () => void } {
+  let listener: (() => void) | undefined;
+  const promise = new Promise<undefined>((resolve) => {
+    if (signal.aborted) return resolve(undefined);
+    listener = () => resolve(undefined);
+    signal.addEventListener('abort', listener, { once: true });
+  });
+  return { promise, dispose: () => listener && signal.removeEventListener('abort', listener) };
 }
 
 /**
@@ -445,6 +554,15 @@ export function nearLimitNote(near: NearLimit): string {
     `(${nearLimitAmount(near)}). Finish what you are doing in as few steps as you can, start ` +
     'nothing big (no new sub-agents), then stop and report what is done and what is left; the ' +
     'user can continue in a new message.'
+  );
+}
+
+/** What the agent is told when the turn limit stopped it in the middle of its work. */
+export function turnLimitNote(maxTurns: number): string {
+  return (
+    `heaw: this message has reached its limit of ${maxTurns} turns, so no more tools can be ` +
+    'called. Write your final answer now from what you have: what you did and found, what is ' +
+    'left, and what could not be checked. It can be continued in a new message.'
   );
 }
 

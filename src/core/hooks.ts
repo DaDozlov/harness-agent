@@ -105,6 +105,35 @@ export interface Hooks {
   ) => Result<void>;
 }
 
+/**
+ * Events recorded while a hook runs (the agents it starts), which the loop passes on as they
+ * come, not once the hook returns: a tester can take minutes, and the user should see it working.
+ */
+export class HookEvents {
+  readonly #items: EngineEventBody[] = [];
+  #wake: (() => void) | undefined;
+
+  push(body: EngineEventBody): void {
+    this.#items.push(body);
+    this.#wake?.();
+  }
+
+  take(): EngineEventBody[] {
+    return this.#items.splice(0);
+  }
+
+  /** Resolves once an event is waiting to be taken. */
+  arrived(): Promise<void> {
+    if (this.#items.length) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.#wake = () => {
+        this.#wake = undefined;
+        resolve();
+      };
+    });
+  }
+}
+
 /** A hook that threw: reported as a recoverable error, and otherwise skipped. */
 export interface HookFailure {
   hook: HookName;

@@ -8,6 +8,8 @@ export interface McpServerStatus {
   status: McpStatus;
   error: string | undefined;
   tools: number;
+  /** Tools held back: changed or added since the user connected the server. */
+  held: string[];
   transport: 'stdio' | 'http' | 'sse';
   source: string;
 }
@@ -74,6 +76,11 @@ export class McpManager {
     return true;
   }
 
+  /** Accepts a server's tools as they are now (`heaw mcp trust`). False when it is not connected. */
+  trust(name: string): boolean {
+    return this.#connections.get(name)?.trust() ?? false;
+  }
+
   /** Resolves when every server that is starting has connected or failed, or after the timeout. */
   async ready(timeoutMs: number): Promise<void> {
     if (!this.#pending.size) return;
@@ -109,6 +116,7 @@ export class McpManager {
       status: connection.status,
       error: connection.error,
       tools: connection.status === 'connected' ? toolsOf(connection).length : 0,
+      held: [...connection.held],
       transport: connection.transport,
       source: connection.entry.source,
     }));

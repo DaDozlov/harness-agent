@@ -15,7 +15,7 @@ export default defineConfig({ /* settings below */ });
 | `providers` | Provider settings by name; custom names need `type` (see below) | built-in env vars |
 | `models` | Per model: `contextWindow`, `maxOutputTokens`, `pricing: { input, cacheRead, output }` (USD / 1M tokens) | catalog |
 | `permissions` | `mode`, `allow`, `ask`, `deny` rules | `default`, no rules |
-| `limits` | Per run: `maxTurns`, `maxTokens`, `maxCostUsd`, `maxMinutes` | 100 turns |
+| `limits` | Per run: `maxTurns`, `maxTokens`, `maxCostUsd`, `maxMinutes`. At 80% of one the agent is asked to wrap up; stopped at the turn limit, it gets one more call without tools for its final answer | 100 turns |
 | `context.compactAt` | Compact at this share of the window, or `false` | `0.8` |
 | `hooks` | Functions at fixed points (below); one set or an array | — |
 | `verifyChanges` | Send the agent back once when it changed files and ran nothing since | `true` (off with a `beforeStop` hook) |
@@ -26,7 +26,7 @@ export default defineConfig({ /* settings below */ });
 | `mcpTools` | `on-demand`: MCP tools are listed by name and the agent loads the ones it needs (`load_tools`), so their schemas are not sent with every call; `all`; `auto` | `auto`: on demand above 20 tools |
 | `http.apis` | APIs for `http_request` by base URL: `{ headers, description }` | — |
 | `subagents` | `maxDepth`, `maxParallel`, `limits`, `model` (for sub-agents whose agent file names none, e.g. a cheaper one), `minBudget` (the least share of the run's budget a sub-agent starts with) | `1`, `4`, 50 turns, the caller's model, $0.50 / 30,000 tokens |
-| `workspace` | `type: 'local' \| 'docker'`, `shell`; Docker options below | local |
+| `workspace` | `type: 'local' \| 'docker'`, `shell`, `passEnv` (variables commands get although they look like secrets, e.g. `['GH_TOKEN']`); Docker options below | local |
 | `telemetry` | `endpoint`, `headers`, `serviceName`, `captureContent` | off |
 | `sessions.save` | Save sessions in `.heaw/sessions/` | `true` |
 
@@ -54,9 +54,11 @@ heaw reads `.env` from the project root.
 
 Order: deny → approvals (`--allow`, "yes for the session") → protected files → ask → allow → mode. Protected files (`heaw.config.*`, `.mcp.json`, `.heaw/`, `.git/`) are always asked about.
 
+**What rules cannot do.** They decide which calls run, not what a command does once it runs. Locally, an allowed command (or a test the agent wrote and then ran) runs with your rights: it can change protected files, read `.env` despite the `read_file` deny rule, and reach the network. Commands do not get heaw's API keys or variables that look like secrets (`workspace.passEnv` passes one on), but for unattended runs with commands allowed, use the Docker workspace, which confines them. An unattended run in `bypass` mode (`heaw run --mode bypass`) does so by default, unless the config sets `workspace: { type: 'local' }`.
+
 For git commands that only read, allow `run_command(git status*)`, `run_command(git diff)` and `run_command(git diff -- *)`, not `git diff*`: `--output=<file>` writes a file, while after `--` everything is a path (`/setup` suggests these).
 
-A command line is checked command by command (`npm run build && npm test`, `a; b`, `a | b`): a deny or ask rule that matches any of them applies, and allow rules allow the line only when each command is allowed. Output piped into `head`, `tail`, `grep`, `wc`, `cut` or `tr` needs nothing. A pattern never allows a command with `$(…)` or backticks; only a rule without one (`run_command`) does.
+A command line is checked command by command (`npm run build && npm test`, `a; b`, `a | b`): a deny or ask rule that matches any of them applies, and allow rules allow the line only when each command is allowed. Output piped into `head`, `tail`, `grep`, `wc`, `cut` or `tr` needs nothing. A pattern never allows a command with `$(…)` or backticks; only a rule without one (`run_command`) does. Nor does it allow output into a file (`npm test > out.txt`) unless the rule writes the redirect out (`run_command(npm test > out.txt)`).
 
 "Yes for the session" (**a**) allows the call, and also: after a file edit in `default` mode, all file edits (`accept-edits`); after a command, commands starting with the same words (`./mvnw -q test …`), for each command of a chained line. Shells, interpreters and destructive programs (`python`, `node`, `tsx`, `cross-env`, `docker`, `curl`, `rm`, …) are allowed only exactly, also behind `npx`, `npm exec` or `pnpm dlx`, and so is a line with one of them. The prompt shows what it allows.
 
@@ -74,7 +76,7 @@ A command line is checked command by command (`npm run build && npm test`, `a; b
 | `subagentStart` / `subagentEnd` | Change or block a sub-agent's task / report |
 | `sessionEnd` | Clean up, export |
 
-Every hook gets `workspace` (run checks with `workspace.exec`), the session and agent ids, the model and a signal; `runAgent(name, task)` runs a named agent, e.g. a reviewer. Personal hooks run before project hooks. A failing `beforeToolCall` blocks the call; other failures are reported and skipped. When `beforeStop` returns the same feedback 3 times in a row (timings aside), the run stops with `check_failed`: the agent is stuck, or the check cannot run.
+Every hook gets `workspace` (run checks with `workspace.exec`), the session and agent ids, the model and the run's `signal`; pass it on (`workspace.exec('npm test', { signal })`) so that Esc stops the check. `runAgent(name, task)` runs a named agent, e.g. a reviewer; Esc stops it too, and its model calls count into the run's cost and the cost limit. An interrupted run waits at most 1.5 seconds for a hook that ignores the signal. Personal hooks run before project hooks. A failing `beforeToolCall` blocks the call; other failures are reported and skipped. When `beforeStop` returns the same feedback 3 times in a row (timings aside), the run stops with `check_failed`: the agent is stuck, or the check cannot run.
 
 ## Agents and skills
 
@@ -106,10 +108,10 @@ heaw mcp search jira                                   # official MCP Registry
 heaw mcp install com.atlassian/atlassian-mcp-server
 heaw mcp add files -- npx -y @modelcontextprotocol/server-filesystem .
 heaw mcp add docs --url https://example.com/mcp --header "Authorization: Bearer \${DOCS_TOKEN}"
-heaw mcp list | test <name> | login <name> | logout <name> | remove <name>
+heaw mcp list | test <name> | trust <name> | login <name> | logout <name> | remove <name>
 ```
 
-Tools appear as `mcp__<server>__<tool>` and ask before running unless allowed. Logins are kept in `~/.heaw/credentials/mcp/`.
+Tools appear as `mcp__<server>__<tool>` and ask before running unless allowed. Logins are kept in `~/.heaw/credentials/mcp/`. A server's tools are pinned when it first connects (`~/.heaw/mcp-pins.json`): one whose description or arguments change later, or a new one, is held back until you look at it (`heaw mcp test <name>`) and accept it (`heaw mcp trust <name>`, or `/mcp trust <name>` in the chat).
 
 ## Tracing
 

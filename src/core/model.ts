@@ -39,6 +39,11 @@ export interface ModelRequest {
   system: string;
   messages: Message[];
   tools?: ToolSpec[];
+  /**
+   * `none`: the tools stay described (the history has calls to them) but the model must answer
+   * in text, e.g. its report at the turn limit. Default: `auto`.
+   */
+  toolChoice?: 'auto' | 'none';
   maxOutputTokens?: number;
   temperature?: number;
   reasoningEffort?: 'low' | 'medium' | 'high';

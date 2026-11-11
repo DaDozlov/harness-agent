@@ -305,7 +305,10 @@ describe('/mcp in the chat', () => {
 
     expect(empty.printed).toEqual([
       ['info', 'No MCP servers. Add one with heaw mcp add, or ask me to find and install one.'],
-      ['error', 'Unknown option "frobnicate". Use /mcp, /mcp reload or /mcp login <server>.'],
+      [
+        'error',
+        'Unknown option "frobnicate". Use /mcp, /mcp reload, /mcp login <server> or /mcp trust <server>.',
+      ],
       ['info', 'Reloading MCP servers…'],
       ['info', 'MCP servers cannot be reloaded in this setup.'],
     ]);
