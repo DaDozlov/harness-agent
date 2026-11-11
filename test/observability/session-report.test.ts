@@ -95,6 +95,36 @@ describe('the session report', () => {
     expect(runSteps(records, 9)).toBe('There is no run 9; this session has 2.');
   });
 
+  it('tells a check that passed with findings from one that sent the agent back', async () => {
+    const workspace = await tempWorkspace();
+    const store = new JsonlSessionStore(workspace.root);
+    const engine = await createEngine({
+      model: new ScriptedModelClient([
+        { text: 'Done.' },
+        { text: 'Done; the tester used the page and it works.' },
+      ]),
+      workspace,
+      toolsets: ['fs'],
+      interactive: false,
+      git: false,
+      sessionStore: store,
+      hooks: { beforeStop: () => ({ note: 'The tester: Verdict: works' }) },
+    });
+    const session = engine.session();
+    await collect(session.send('Add the email'));
+    await session.close();
+    await engine.dispose();
+
+    const records = await store.load(session.id);
+    const report = sessionReport(session.id, records);
+    expect(report).toContain('checks passed with findings 1×');
+    // A retro read "sent back" here as a failure, and wrote a rule against it.
+    expect(report).not.toContain('sent back');
+    expect(runSteps(records, 1)).toContain(
+      'heaw → [main] checks passed; their findings went to the agent for its final answer: The tester: Verdict: works',
+    );
+  });
+
   it('reviews the last session by default, and this one once it has earlier runs', async () => {
     const { engine, model } = await setup([
       { text: 'Hello.' },

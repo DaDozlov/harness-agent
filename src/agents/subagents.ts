@@ -141,6 +141,15 @@ export function delegateTool(options: {
       const share = shareOf(parent.remaining(), context.together ?? 1);
       const short = tooLittle(share, parent.remaining(), context.together ?? 1, options.settings);
       if (short) return { output: short, isError: true };
+      const runsByName = parent.started;
+      const maxRuns = definition?.maxRuns;
+      if (definition && maxRuns !== undefined && runsByName) {
+        const ran = runsByName.get(definition.name) ?? 0;
+        if (ran >= maxRuns) {
+          return { output: maxRunsNote(definition, maxRuns, ran), isError: true };
+        }
+        runsByName.set(definition.name, ran + 1);
+      }
       await slots.acquire(context.signal);
       try {
         return await runSubagent({
@@ -163,6 +172,16 @@ export function delegateTool(options: {
       }
     },
   });
+}
+
+/** Why a named agent with `maxRuns` was not started again in this message. */
+function maxRunsNote(definition: AgentDefinition, maxRuns: number, ran: number): string {
+  const times = (count: number) => (count === 1 ? 'once' : `${count} times`);
+  return (
+    `Not started: ${definition.name} runs at most ${times(maxRuns)} per message ` +
+    `(its agent file, ${definition.source}), and it ran ${times(ran)}. Fix what it marked as ` +
+    'must-fix, list its other points in your answer, and leave another round to the user.'
+  );
 }
 
 async function runSubagent(run: {

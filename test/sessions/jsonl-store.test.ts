@@ -83,6 +83,22 @@ describe('JsonlSessionStore', () => {
     expect(sessions[0]?.title).toHaveLength(80);
   });
 
+  it('leaves sessions a hook ran out of the list, and still loads them by id', async () => {
+    const store = await tempStore();
+    await store.append('chat', [header('chat'), user('Add the email')]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The tester the chat's check ran, saved last.
+    await store.append('tester', [
+      { ...header('tester'), startedBy: 'chat' } as SessionRecord,
+      user('Changed: public/format.js. Use the pages they affect.'),
+    ]);
+
+    expect((await store.list()).map((s) => s.id)).toEqual(['chat']);
+    expect((await store.list(1)).map((s) => s.id)).toEqual(['chat']);
+    expect(await store.resolve('tester')).toBe('tester');
+    expect(await store.load('tester')).toHaveLength(2);
+  });
+
   it('resolves ids and unique prefixes, and rejects unknown, ambiguous and unsafe ones', async () => {
     const store = await tempStore();
     await store.append('20261030-100000-aaaa', [header('a')]);

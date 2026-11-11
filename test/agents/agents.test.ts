@@ -158,8 +158,17 @@ describe('heaw init', () => {
         mode: 'read-only',
         tools: ['read_file', 'list_dir', 'glob', 'grep'],
         limits: { maxTurns: 30 },
+        maxRuns: 2,
       },
     ]);
+  });
+
+  it('refuses a maxRuns that is not a whole number of at least 1', () => {
+    const file = (value: string) =>
+      `---\nname: reviewer\ndescription: Reviews.\nmaxRuns: ${value}\n---\nReview.`;
+    expect(parseAgentDefinition(file('2'), 'r.md').definition.maxRuns).toBe(2);
+    expect(() => parseAgentDefinition(file('0'), 'r.md')).toThrow('maxRuns must be');
+    expect(() => parseAgentDefinition(file('1.5'), 'r.md')).toThrow('maxRuns must be');
   });
 });
 
@@ -577,6 +586,33 @@ describe('delegate', () => {
     );
     expect(types.filter((type) => type === 'subagent.start')).toHaveLength(1);
     expect(types.filter((type) => type === 'subagent.end')).toHaveLength(1);
+  });
+
+  it('starts an agent with maxRuns at most that often per message', async () => {
+    const { model, engine } = await engineWith(
+      [
+        delegate({ agent: 'reviewer', task: 'Review app.ts' }, 'd1'),
+        { text: 'Must fix: app.ts:1.' },
+        delegate({ agent: 'reviewer', task: 'Review app.ts again' }, 'd2'),
+        { text: 'Fixed the must-fix point; the reviewer is not run again in this message.' },
+        // The next message may run it again.
+        delegate({ agent: 'reviewer', task: 'Review the next change' }, 'd3'),
+        { text: 'Looks fine.' },
+        { text: 'Reviewed.' },
+      ],
+      { agents: [{ ...reviewer, maxRuns: 1 }] },
+    );
+    const session = engine.session();
+
+    await collect(session.send('Fix and review app.ts'));
+    await collect(session.send('Review the next change'));
+    await engine.dispose();
+
+    expect(lastToolOutput(model.requests[3])).toMatch(
+      /^Not started: reviewer runs at most once per message \(its agent file, .*\), and it ran once\. Fix what it marked as must-fix, list its other points in your answer/,
+    );
+    expect(model.requests[5]?.system).toContain('## Your role: reviewer');
+    expect(lastToolOutput(model.requests[6])).toBe('Looks fine.');
   });
 
   it('explains an unknown agent', async () => {

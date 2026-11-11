@@ -89,6 +89,7 @@ mode: read-only                 # stricter than the caller, never looser; allow 
 model: anthropic:claude-sonnet-4-5  # or inherit (the caller's); default: subagents.model, else the caller's
 reasoningEffort: high           # low | medium | high; default: the config's
 maxTurns: 30                    # also maxTokens, maxCostUsd, maxMinutes
+maxRuns: 2                      # delegate starts it at most twice per message; default: no limit
 mcpServers:                     # its own, as in .mcp.json: started on its first run, for it only
   browser:
     command: npx

@@ -28,6 +28,12 @@ export interface AgentDefinition {
   reasoningEffort?: ReasoningEffort;
   limits?: Partial<RunLimits>;
   /**
+   * How often `delegate` may start it per message of the calling agent, e.g. 2 for a reviewer:
+   * a review always finds something more, and agents told to review again only once still ran
+   * three rounds per message. Default: no limit.
+   */
+  maxRuns?: number;
+  /**
    * MCP servers only this agent uses, such as a browser for a tester: started when it first runs,
    * their tools given to it besides `tools`, and allowed for it unless a deny rule says otherwise.
    */
@@ -138,6 +144,11 @@ export function parseAgentDefinition(
     limits[key] = value;
   }
 
+  const maxRuns = data['maxRuns'];
+  if (maxRuns !== undefined && (!Number.isInteger(maxRuns) || (maxRuns as number) < 1)) {
+    throw new Error('maxRuns must be a whole number of at least 1');
+  }
+
   const tools = toolList(data['tools']);
   const mcpServers = serverList(data['mcpServers'], source);
   const prompt = body.trim();
@@ -151,6 +162,7 @@ export function parseAgentDefinition(
       ...(mode && { mode: mode as PermissionMode }),
       ...(effort && { reasoningEffort: effort as ReasoningEffort }),
       ...(Object.keys(limits).length && { limits }),
+      ...(maxRuns !== undefined && { maxRuns: maxRuns as number }),
       ...(mcpServers?.length && { mcpServers }),
       source,
     },

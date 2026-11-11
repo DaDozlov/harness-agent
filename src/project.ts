@@ -24,6 +24,7 @@ import { BUILT_IN_SKILLS } from './skills/built-in.js';
 import { loadSkills } from './skills/skills.js';
 import { DEFAULT_TOOLSETS } from './tools/index.js';
 import { DockerWorkspace, type DockerOptions } from './workspace/docker.js';
+import { PROCESSES_DIR, ProcessLog, stopLeftovers } from './workspace/leftovers.js';
 import { LocalWorkspace } from './workspace/local.js';
 import { detectShell } from './workspace/shell.js';
 
@@ -106,12 +107,16 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     config.workspace?.type === 'docker' || unattendedBypass
       ? await dockerOptions({ ...config.workspace, type: 'docker' }, env, projectRoot)
       : undefined;
+  const home = heawHome(env);
+  // Commands an earlier heaw left running when it ended without stopping them (docs/DESIGN.md
+  // §4.12), and where this one notes its own.
+  const processes = join(home, PROCESSES_DIR);
+  const leftovers = await stopLeftovers(processes);
   const shell = env.HEAW_SHELL ?? config.workspace?.shell;
   const createWorkspace = (root: string): Workspace =>
     docker
       ? new DockerWorkspace(root, docker)
-      : localWorkspace(root, shell, env, (name) => hiddenFromCommands(name));
-  const home = heawHome(env);
+      : localWorkspace(root, shell, env, (name) => hiddenFromCommands(name), processes);
   const readMcp = async (servers: HeawConfig['mcpServers']) =>
     loadMcpServers({
       projectRoot,
@@ -202,7 +207,12 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
   return {
     options: engineOptions,
     loaded,
-    warnings: [...agents.problems, ...skills.problems, ...(unattendedBypass ? [IN_DOCKER] : [])],
+    warnings: [
+      ...leftovers,
+      ...agents.problems,
+      ...skills.problems,
+      ...(unattendedBypass ? [IN_DOCKER] : []),
+    ],
     createWorkspace,
   };
 }
@@ -273,10 +283,12 @@ function localWorkspace(
   shell: string | undefined,
   env: Env,
   hideEnv: (name: string) => boolean,
+  processes: string,
 ): LocalWorkspace {
   return new LocalWorkspace(root, {
     shell: detectShell({ ...env, ...(shell && { HEAW_SHELL: shell }) }),
     hideEnv,
+    processLog: new ProcessLog(processes),
   });
 }
 

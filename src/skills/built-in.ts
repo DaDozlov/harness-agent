@@ -67,7 +67,7 @@ export const SETUP_HARNESS_SKILL: Skill = {
   dir: '',
   shownDir: 'built into heaw',
   content: [
-    'You set up heaw, the harness you run in, for this project, together with the user. Go step by step: one topic per message, at most two questions at a time, each with your suggested answer so the user can just reply "ok". Propose what you can work out yourself instead of asking for it.',
+    'You set up heaw, the harness you run in, for this project, together with the user, in three rounds: agree on the project and its stack (step 1); check the toolchain and ask everything else in one message (steps 2 to 5); write the files (step 6). Number the points of that message, each with your suggested answer, so the user can reply "ok" or change single points. Propose what you can work out yourself instead of asking for it. (One topic per message took six rounds, four of them a plain "ok".)',
     '',
     '| Part | Files |',
     '|---|---|',
@@ -86,7 +86,7 @@ export const SETUP_HARNESS_SKILL: Skill = {
     '',
     '## Step 2: the toolchain',
     '',
-    "Once the stack is chosen, check that its tools are installed before relying on them, and only those (not every runtime on the machine): run their version commands (`node -v`, `java -version`, `mvn -v`, `python --version`, `dotnet --version`, …). If one is missing, tell the user exactly what to install, or propose the project's own wrapper made by the real tool (such as the Maven wrapper), and wait. Never write a fake stand-in for a missing tool.",
+    "Once the stack is chosen, check that its tools are installed before relying on them, and only those (not every runtime on the machine): run their version commands (`node -v`, `java -version`, `mvn -v`, `python --version`, `dotnet --version`, …), and for a web app the browser check of step 3, all in one response. If one is missing, tell the user exactly what to install, or propose the project's own wrapper made by the real tool (such as the Maven wrapper), and wait. Never write a fake stand-in for a missing tool. When all are there, say so in a line and go on in the same message with steps 3 to 5.",
     '',
     '## Step 3: checks before finishing',
     '',

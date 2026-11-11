@@ -103,6 +103,8 @@ export interface AgentContext {
   changes?: FileChanges | undefined;
   /** Plan mode of the user's agent; sub-agents have none. */
   plan?: PlanControl | undefined;
+  /** Named agents `delegate` started in the current run, by name, for their `maxRuns`. */
+  started?: Map<string, number> | undefined;
 }
 
 /** Switches plan mode (docs/DESIGN.md §4.8) from a tool. */

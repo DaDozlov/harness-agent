@@ -16,6 +16,11 @@ export interface SessionHeader {
   intent?: string;
   /** The commit the session started from, and whether there were uncommitted changes then. */
   git?: { head?: string; dirty: boolean };
+  /**
+   * The conversation whose hook ran this one (a tester in `beforeStop`). Kept for audits and
+   * `/retro`, and left out of session lists: it is part of that conversation, not one of its own.
+   */
+  startedBy?: string;
 }
 
 /**
@@ -49,13 +54,18 @@ export interface SessionSummary {
   commits: Array<{ hash: string; subject: string }>;
   /** The commit it started from, and whether there were uncommitted changes then. */
   git?: { head?: string; dirty: boolean };
+  /** The conversation whose hook ran it (see `SessionHeader.startedBy`). */
+  startedBy?: string;
 }
 
 /** Where sessions are saved. The default writes JSONL files to `.heaw/sessions/`. */
 export interface SessionStore {
   append(sessionId: string, records: SessionRecord[]): Promise<void>;
   load(sessionId: string): Promise<SessionRecord[]>;
-  /** Most recently updated first. */
+  /**
+   * Most recently updated first, without the sessions hooks ran (`startedBy`): those belong to
+   * the conversation that ran them, and are loaded by id.
+   */
   list(limit?: number): Promise<SessionSummary[]>;
   /** The full id for an id or a unique prefix of one. */
   resolve(idOrPrefix: string): Promise<string>;
@@ -134,6 +144,7 @@ export function summarize(id: string, records: SessionRecord[], updatedAt: Date)
     pullRequests: [...new Set(links('pull_request').map((link) => link.ref))],
     commits: links('commit').map((link) => ({ hash: link.ref, subject: link.title ?? '' })),
     ...(header?.git && { git: header.git }),
+    ...(header?.startedBy && { startedBy: header.startedBy }),
   };
 }
 

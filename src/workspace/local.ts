@@ -21,6 +21,7 @@ import {
   OutputBuffer,
 } from './exec.js';
 import { isSecretName } from '../core/redact.js';
+import type { ProcessLog } from './leftovers.js';
 import { killMarked, killTree } from './process.js';
 import { detectShell, type ShellSpec } from './shell.js';
 
@@ -28,6 +29,8 @@ export interface LocalWorkspaceOptions {
   shell?: ShellSpec;
   /** Variables commands do not get. Default: those whose name looks like a secret. */
   hideEnv?: (name: string) => boolean;
+  /** Notes running commands, so a later heaw can stop them if this one ends without (`stopLeftovers`). */
+  processLog?: ProcessLog;
 }
 
 /** Runs tools directly on this machine, confined to `root` (docs/DESIGN.md §4.12). */
@@ -43,12 +46,14 @@ export class LocalWorkspace implements Workspace {
 
   /** Variables kept from commands: heaw's credentials and anything that looks like a secret. */
   readonly #hidden: (name: string) => boolean;
+  readonly #log: ProcessLog | undefined;
 
   constructor(root: string, options: LocalWorkspaceOptions = {}) {
     this.root = resolve(root);
     this.#shell = options.shell ?? detectShell();
     this.shell = this.#shell.name;
     this.#hidden = options.hideEnv ?? isSecretName;
+    this.#log = options.processLog;
   }
 
   /**
@@ -153,8 +158,9 @@ export class LocalWorkspace implements Workspace {
   async exec(command: string, options: ExecOptions = {}): Promise<ExecResult> {
     // Marks every process of this command, so stopping it can find them all (see #stop).
     const execId = randomUUID();
+    const cwd = this.resolve(options.cwd ?? '.');
     const child = spawn(this.#shell.file, this.#shell.args(command), {
-      cwd: this.resolve(options.cwd ?? '.'),
+      cwd,
       env: { ...this.#commandEnv(), ...COMMAND_ENV, HEAW_EXEC_ID: execId },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -162,6 +168,17 @@ export class LocalWorkspace implements Workspace {
       detached: process.platform !== 'win32',
     });
     this.#running.set(child, execId);
+    const { pid } = child;
+    if (pid !== undefined) {
+      this.#log?.add({
+        pid,
+        startedAt: Date.now(),
+        execId,
+        command,
+        cwd,
+        ...(this.#shell.msys && process.platform === 'win32' && { msysBash: this.#shell.file }),
+      });
+    }
     try {
       return await capture(child, {
         timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
@@ -172,6 +189,7 @@ export class LocalWorkspace implements Workspace {
       });
     } finally {
       this.#running.delete(child);
+      if (pid !== undefined) this.#log?.remove(pid);
     }
   }
 
@@ -212,6 +230,7 @@ export class LocalWorkspace implements Workspace {
     for (const [child, execId] of this.#running) this.#stop(child, execId);
     this.#running.clear();
     await Promise.all(this.#stopping);
+    this.#log?.close();
   }
 
   #isOutside(absolute: string): boolean {

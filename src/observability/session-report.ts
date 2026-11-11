@@ -160,9 +160,13 @@ function runList(runs: Run[], records: SessionRecord[]): string | undefined {
     const ends = inside.filter((event): event is Of<'tool.end'> => event.type === 'tool.end');
     const failed = ends.filter((event) => event.status === 'error').length;
     const denied = ends.filter((event) => event.status === 'denied').length;
-    const backs = inside.filter(
-      (event) => event.type === 'hook' && event.hook === 'beforeStop',
-    ).length;
+    // A check that passed with a note (the tester's findings) did not send the agent back: it
+    // gave its answer again with them, as meant. Counted apart, or a retro reads it as a failure.
+    const stops = inside.filter(
+      (event): event is Of<'hook'> => event.type === 'hook' && event.hook === 'beforeStop',
+    );
+    const backs = stops.filter((event) => !event.passed).length;
+    const passed = stops.length - backs;
     const near = inside.find(
       (event): event is Of<'limit.near'> => event.type === 'limit.near' && !event.parentAgentId,
     );
@@ -177,6 +181,7 @@ function runList(runs: Run[], records: SessionRecord[]): string | undefined {
           : ''),
       count('subagent.start') && `${count('subagent.start')} sub-agents`,
       backs && `sent back ${backs}×`,
+      passed && `checks passed with findings ${passed}×`,
       count('stuck') && `going in circles ${count('stuck')}×`,
       near && `near its ${near.limit} limit`,
     ].filter(Boolean);
@@ -569,6 +574,9 @@ function steps(event: EngineEvent, who: string, turnOf: Map<string, number>): st
     case 'approval.response':
       return `   → the user: ${event.decision.allow ? (event.decision.scope === 'session' ? 'yes for the session' : 'yes') : `no${event.decision.feedback ? `: "${short(event.decision.feedback, 200)}"` : ''}`}`;
     case 'hook':
+      if (event.passed) {
+        return `heaw → [${who}] checks passed; their findings went to the agent for its final answer: ${short(event.message, 240)}`;
+      }
       return `heaw → [${who}] ${event.builtIn ? 'sent back' : `${event.hook} hook`}: ${short(event.message, 240)}`;
     case 'stuck':
       return `heaw → [${who}] going in circles: ${short(event.subject, 120)} (${event.count}×)`;

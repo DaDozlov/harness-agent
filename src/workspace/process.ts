@@ -25,22 +25,41 @@ export function killTree(child: ChildProcess): Promise<void> {
     });
   }
 
+  return killGroup(pid, (signal) => child.kill(signal));
+}
+
+/**
+ * POSIX: stops a process group (a command spawned with `detached: true`, led by its shell),
+ * SIGTERM first and SIGKILL when it does not end. `fallback` signals the shell alone when the
+ * group cannot be signalled.
+ */
+export async function killGroup(
+  pid: number,
+  fallback: (signal: NodeJS.Signals) => void = () => {},
+): Promise<void> {
   const signalGroup = (signal: NodeJS.Signals) => {
     try {
       process.kill(-pid, signal);
     } catch {
-      child.kill(signal);
+      fallback(signal);
     }
   };
   // Waits for the whole group, not the shell: the shell ends at once on SIGTERM while what it
   // started is still shutting down, or ignores SIGTERM. A SIGKILL left to a timer would never
   // be sent if heaw exited first, and was skipped once the shell had ended.
-  return (async () => {
-    signalGroup('SIGTERM');
-    if (await groupGone(pid, STOP_GRACE_MS)) return;
-    signalGroup('SIGKILL');
-    await groupGone(pid, KILL_WAIT_MS);
-  })();
+  signalGroup('SIGTERM');
+  if (await groupGone(pid, STOP_GRACE_MS)) return;
+  signalGroup('SIGKILL');
+  await groupGone(pid, KILL_WAIT_MS);
+}
+
+/** Windows: stops a process and everything it started, by id. */
+export function killWindowsTree(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+      .on('error', () => resolve())
+      .on('close', () => resolve());
+  });
 }
 
 /** How long a stopped command may take to end on SIGTERM before its group is killed. */
@@ -72,15 +91,17 @@ const SWEEP_TIMEOUT_MS = 10_000;
  * dev server started that way would outlive a stop, holding the output pipe open. Git Bash keeps
  * its own process table, where exec keeps the process and its environment: every process still
  * carrying the command's `HEAW_EXEC_ID` is found in `/proc` and stopped with its Windows subtree.
+ * Resolves with how many such processes it found.
  */
-export function killMarked(bash: string, execId: string): Promise<void> {
+export function killMarked(bash: string, execId: string): Promise<number> {
   const script =
     'for p in /proc/[0-9]*; do ' +
     `grep -qa "HEAW_EXEC_ID=${execId}" "$p/environ" 2>/dev/null && cat "$p/winpid"; done`;
   return new Promise((resolve) => {
+    let pids: string[] = [];
     const done = () => {
       clearTimeout(timer);
-      resolve();
+      resolve(pids.length);
     };
     const timer = setTimeout(done, SWEEP_TIMEOUT_MS);
     let found = '';
@@ -93,7 +114,7 @@ export function killMarked(bash: string, execId: string): Promise<void> {
     sweep.stdout.setEncoding('utf8').on('data', (text: string) => (found += text));
     sweep.on('error', done);
     sweep.on('close', () => {
-      const pids = found.split(/\s+/).filter((pid) => /^\d+$/.test(pid));
+      pids = found.split(/\s+/).filter((pid) => /^\d+$/.test(pid));
       if (!pids.length) return done();
       spawn('taskkill', [...pids.flatMap((pid) => ['/pid', pid]), '/T', '/F'], {
         stdio: 'ignore',

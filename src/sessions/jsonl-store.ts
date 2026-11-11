@@ -50,13 +50,20 @@ export class JsonlSessionStore implements SessionStore {
     const withTimes = await Promise.all(
       files.map(async (file) => ({ file, mtime: (await stat(join(this.dir, file))).mtime })),
     );
-    const recent = withTimes.sort((a, b) => b.mtime.getTime() - a.mtime.getTime()).slice(0, limit);
-    return Promise.all(
-      recent.map(async ({ file, mtime }) => {
-        const id = file.slice(0, -'.jsonl'.length);
-        return summarize(id, parseLines(await readFile(join(this.dir, file), 'utf8')), mtime);
-      }),
-    );
+    const recent = withTimes.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+    const listed: SessionSummary[] = [];
+    // In order, until enough: the sessions hooks ran are skipped, so a fixed slice could fall short.
+    for (const { file, mtime } of recent) {
+      if (listed.length >= limit) break;
+      const id = file.slice(0, -'.jsonl'.length);
+      const summary = summarize(
+        id,
+        parseLines(await readFile(join(this.dir, file), 'utf8')),
+        mtime,
+      );
+      if (!summary.startedBy) listed.push(summary);
+    }
+    return listed;
   }
 
   async resolve(idOrPrefix: string): Promise<string> {

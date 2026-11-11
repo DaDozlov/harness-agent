@@ -1,8 +1,10 @@
+import { readdir } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import type { AgentDefinition } from '../../src/agents/definitions.js';
 import type { EngineEvent } from '../../src/core/events.js';
 import { createEngine, type EngineOptions } from '../../src/engine.js';
 import { ScriptedModelClient, type ScriptedResponse } from '../../src/providers/scripted.js';
+import { JsonlSessionStore } from '../../src/sessions/jsonl-store.js';
 import { collect, tempWorkspaceFactory } from '../helpers.js';
 
 const tempWorkspace = tempWorkspaceFactory();
@@ -134,6 +136,7 @@ describe('runAgent in hooks', () => {
   it('lets beforeStop ask a reviewer, which cannot start agents itself', async () => {
     const seen: Array<boolean> = [];
     let reviews = 0;
+    const store = new JsonlSessionStore((await tempWorkspace()).root);
     const { model, engine } = await engineWith(
       [
         { text: 'All done.', usage: { inputTokens: 100, outputTokens: 10 } },
@@ -155,11 +158,24 @@ describe('runAgent in hooks', () => {
           // Tool hooks run in the reviewer too; conversation hooks do not.
           sessionStart: ({ runAgent }) => void seen.push(runAgent !== undefined),
         },
+        sessionStore: store,
       },
     );
 
-    const events = await collect(engine.session().send('Change the answer'));
+    const session = engine.session();
+    const events = await collect(session.send('Change the answer'));
     await engine.dispose();
+
+    // The reviewer's session is saved as part of this conversation, out of the session list.
+    expect((await store.list()).map((summary) => summary.id)).toEqual([session.id]);
+    const saved = await Promise.all(
+      (await readdir(store.dir))
+        .filter((file) => file.endsWith('.jsonl'))
+        .map(async (file) => (await store.load(file.slice(0, -'.jsonl'.length)))[0]),
+    );
+    expect(saved).toEqual(
+      expect.arrayContaining([expect.objectContaining({ startedBy: session.id })]),
+    );
 
     expect(seen).toEqual([true, true, true]);
     // The user sees that the reviewer ran, and its last line.

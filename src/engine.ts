@@ -577,6 +577,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       id,
       trackGit: useGit,
       ...((setup.intent ?? options.intent) && { intent: setup.intent ?? options.intent }),
+      ...(setup.startedBy && { startedBy: setup.startedBy }),
       // Sub-agents' events reach the tracer through the session that started them.
       ...(observe && { observe }),
       ...(restored && {
@@ -677,12 +678,16 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
   const hookRunAgent = async (
     name: string,
     task: string,
-    run: { signal: AbortSignal; onEvent?: ((event: EngineEvent) => void) | undefined },
+    run: {
+      signal: AbortSignal;
+      onEvent?: ((event: EngineEvent) => void) | undefined;
+      startedBy?: string | undefined;
+    },
   ): Promise<HookAgentResult> => {
     const { text, stopReason, costUsd, turns, usage } = await runNamed(
       name,
       task,
-      { forHook: true },
+      { forHook: true, ...(run.startedBy && { startedBy: run.startedBy }) },
       run,
     );
     return { text, stopReason, turns, usage, ...(costUsd !== undefined && { costUsd }) };
@@ -780,6 +785,8 @@ interface SessionSetup {
   interactive?: boolean;
   /** Started by a hook's `runAgent`. */
   forHook?: boolean;
+  /** For `forHook`: the conversation whose hook started it. */
+  startedBy?: string;
   /** The MCP servers of the agent's own file, started. */
   own?: McpManager | undefined;
   /** Overrides the engine's intent, e.g. a resumed session's own. */

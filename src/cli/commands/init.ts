@@ -213,6 +213,7 @@ description: Reviews code or a change for bugs, risky edits and missing tests, w
 tools: [read_file, list_dir, glob, grep]
 mode: read-only
 maxTurns: 30
+maxRuns: 2
 ---
 You are a careful code reviewer. Read the code you are pointed to, and whatever it depends on,
 before you judge it. Judge it by what the change is meant to do and how big the project is: a

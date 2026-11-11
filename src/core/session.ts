@@ -145,6 +145,8 @@ export interface SessionOptions {
   runAgent?: HookRunAgent | undefined;
   /** What the session is for, e.g. build, explore or ask: saved, and stamped on each run. */
   intent?: string | undefined;
+  /** For an agent a hook runs: the conversation that ran it, saved in the header. */
+  startedBy?: string | undefined;
   /**
    * Notes the git commit the session starts from (for `heaw eval add --from-session`), and links
    * the commits its runs make, so sessions can be traced to the changes they produced.
@@ -161,12 +163,17 @@ export interface SessionOptions {
 
 /**
  * Runs a named agent for a hook. The signal is the run's, so interrupting the run stops it;
- * `onEvent` sees the agent's events, of which its model calls count into the run.
+ * `onEvent` sees the agent's events, of which its model calls count into the run; `startedBy`
+ * is the conversation whose hook runs it, saved with it.
  */
 export type HookRunAgent = (
   name: string,
   task: string,
-  run: { signal: AbortSignal; onEvent?: ((event: EngineEvent) => void) | undefined },
+  run: {
+    signal: AbortSignal;
+    onEvent?: ((event: EngineEvent) => void) | undefined;
+    startedBy?: string | undefined;
+  },
 ) => Promise<HookAgentResult>;
 
 export interface SendOptions {
@@ -220,9 +227,12 @@ export class Session {
   readonly #runAgent: HookRunAgent | undefined;
   /** Sub-agent events of agents a hook runs, until the loop passes them on. */
   readonly #hookEvents = new HookEvents();
+  /** Named agents `delegate` started in the current run (`maxRuns`); cleared at each run. */
+  readonly #startedAgents = new Map<string, number>();
   /** Told to the model with the next input, e.g. that files were rewound. */
   readonly #notes: string[] = [];
   readonly #intent: string | undefined;
+  readonly #startedBy: string | undefined;
   readonly #trackGit: boolean;
   #git: SessionHeader['git'];
   /** Whether the current run ran commands, which may have made commits. */
@@ -287,6 +297,7 @@ export class Session {
     this.#changes = options.changes ?? new FileChanges(this.#workspace);
     this.#runAgent = options.runAgent && this.#shownRuns(options.runAgent);
     this.#intent = options.intent;
+    this.#startedBy = options.startedBy;
     this.#trackGit = options.trackGit ?? false;
     this.#stats = options.stats ?? new UsageStats();
     this.#remindToVerify = options.remindToVerify ?? false;
@@ -340,6 +351,7 @@ export class Session {
         permissions: this.permissions,
         interactive,
         requestApproval,
+        started: this.#startedAgents,
         hooks: this.#hooks,
         hookContext: (signal) => this.#hookContext(signal),
         changes: this.#changes,
@@ -509,6 +521,7 @@ export class Session {
       this.#ranCommands = false;
       this.#reminded = false;
       this.#toldUnfinished = false;
+      this.#startedAgents.clear();
       this.#nudgedAt = undefined;
       this.#tools.loops?.reset();
       if (first) await this.#tellOpenPlan();
@@ -720,6 +733,7 @@ export class Session {
       this.#hookEvents.push({ type: 'subagent.start', childAgentId, name, task });
       const result = await runAgent(name, task, {
         signal,
+        startedBy: this.id,
         onEvent: (event) => {
           if (event.type !== 'usage') return;
           const { usage, model, costUsd } = event;
@@ -968,6 +982,7 @@ export class Session {
         model: this.#model.id,
         ...(this.#intent && { intent: this.#intent }),
         ...(this.#git && { git: this.#git }),
+        ...(this.#startedBy && { startedBy: this.#startedBy }),
       });
     }
     // Screenshots are hundreds of kilobytes each; their descriptions stay in the text.
