@@ -5,7 +5,7 @@ The quickest way to a working setup: `heaw`, then `/setup`. The agent asks about
 ## `heaw.config.ts`
 
 ```ts
-import { defineConfig, env } from 'harness-engineered-agentic-workflow';
+import { defineConfig, env } from 'heaw';
 export default defineConfig({ /* settings below */ });
 ```
 
@@ -93,7 +93,7 @@ name: reviewer
 description: Reviews changes for bugs and missing tests.
 tools: [read_file, grep]        # default: all of the caller's tools
 mode: read-only                 # stricter than the caller, never looser; allow rules and "a" still apply
-model: anthropic:claude-sonnet-4-5  # or inherit (the caller's); default: subagents.model, else the caller's
+model: anthropic:claude-sonnet-5-5  # or inherit (the caller's); default: subagents.model, else the caller's
 reasoningEffort: high           # low | medium | high; default: the config's
 maxTurns: 30                    # also maxTokens, maxCostUsd, maxMinutes
 maxRuns: 2                      # delegate starts it at most twice per message; default: no limit
@@ -107,7 +107,7 @@ You are a careful reviewer. …
 
 An agent's own MCP servers give it their tools besides `tools`, allowed for it without asking (a deny rule still applies); the other agents never see them, so two dozen browser tools cost the main agent nothing. `/setup` offers such a `tester` for web apps: it starts the app, uses the changed pages in a browser, looks at screenshots of them (models that can see get the images: the OpenAI Responses API, Azure and Anthropic) and ends with "Verdict: works", "fix first" or "could not test"; the `beforeStop` hook runs it after interface changes, and plan steps that change the interface are checked with it.
 
-Agents: `.heaw/agents/<name>.md` (Claude Code agent files work). The agent gives each sub-agent its `files` (its other writes are denied) and a `check` it must pass before it reports. Sub-agents started together share what the run's budget has left, and near 80% of a limit (turns, tokens, cost or time) the agent is asked to wrap up. Skills: `<name>/SKILL.md` with `name` and `description` in `.heaw/skills/`, `.agents/skills/` or `.claude/skills/`; personal ones in `~/.heaw/`. Built in: `setup-harness` (`/setup`), `plan-work` (`/plan`) and `retro` (`/retro [session]`: the agent reviews a session with its `session_report` tool and proposes lasting fixes).
+Agents: `.heaw/agents/<name>.md` (Claude Code agent files work). The agent gives each sub-agent its `files` (its other writes are denied; globs with `+(...)` or `*(...)` are refused, since matching them can take minutes) and a `check` it must pass before it reports. Sub-agents started together share what the run's budget has left, and near 80% of a limit (turns, tokens, cost or time) the agent is asked to wrap up. Skills: `<name>/SKILL.md` with `name` and `description` in `.heaw/skills/`, `.agents/skills/` or `.claude/skills/`; personal ones in `~/.heaw/`. Built in: `setup-harness` (`/setup`), `plan-work` (`/plan`) and `retro` (`/retro [session]`: the agent reviews a session with its `session_report` tool and proposes lasting fixes).
 
 ## MCP
 

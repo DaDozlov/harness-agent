@@ -1,4 +1,4 @@
-import { defineConfig, env } from 'harness-engineered-agentic-workflow';
+import { defineConfig, env } from 'heaw';
 
 const SHOP_API = 'http://localhost:4010';
 const MAX_REFUND_EUR = 100;

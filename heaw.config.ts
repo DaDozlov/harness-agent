@@ -1,4 +1,4 @@
-import { defineConfig } from 'harness-engineered-agentic-workflow';
+import { defineConfig } from 'heaw';
 
 /**
  * heaw's own setup: for working on this repository with heaw, and for its eval suite (evals/),

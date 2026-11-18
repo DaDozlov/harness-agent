@@ -14,7 +14,13 @@ heaw runs on Windows, macOS and Linux. Its tests run on all three, with Node.js 
 
 ## Installation
 
-Until the first npm release, install from source:
+```bash
+npm install -g heaw
+```
+
+This adds the `heaw` command. To use heaw as a library in your own code: `npm install heaw`.
+
+To run the latest code instead, install from source:
 
 ```bash
 git clone https://github.com/DaDozlov/harness-agent.git
@@ -23,8 +29,6 @@ npm install
 npm run build
 npm link
 ```
-
-This adds the `heaw` command.
 
 ## Usage
 

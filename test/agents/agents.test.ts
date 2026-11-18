@@ -480,6 +480,21 @@ describe('delegate', () => {
     expect(await workspace.stat('src/app.ts')).toBeUndefined();
   });
 
+  it('does not start a sub-agent whose files repeat an extglob, which can take minutes to match', async () => {
+    const { model, engine } = await engineWith([
+      delegate({ task: 'Build the page', tools: ['write_file'], files: ['src/**', '+(*a)'] }),
+      { text: 'ok' },
+    ]);
+
+    const events = await collect(engine.session().send('go'));
+    await engine.dispose();
+
+    expect(lastToolOutput(model.requests[1])).toMatch(
+      /^Not started: "\+\(\*a\)" repeats a pattern/,
+    );
+    expect(ofType(events, 'subagent.start')).toHaveLength(0);
+  });
+
   it('sends a sub-agent back once when it reports before its check passed', async () => {
     const check = { name: 'run_command', args: { command: 'git --version' } };
     const { model, engine } = await engineWith(

@@ -1,7 +1,7 @@
-# harness-engineered-agentic-workflow — Design (v1)
+# heaw (harness-engineered agentic workflow) — Design (v1)
 
 > Status: **v1 built** (M0–M9 done). The doc describes the harness as built; decisions made while building are recorded in the sections and in §13.
-> Package: `harness-engineered-agentic-workflow` · CLI: `heaw` · License: MIT
+> Package and CLI: `heaw` · License: MIT
 
 ## 1. What this is
 
@@ -353,7 +353,7 @@ delegate({
 })  // → the sub-agent's final message
 ```
 
-`files` and `check` are added to the task it gets. With `files`, its permission view denies writes outside them, so parallel sub-agents cannot step on each other or on the shared files the caller connects them in (commands it runs are not limited by this). With `check`, a sub-agent that can run commands and reports while the last run of that command (alone or in a chained line) did not pass is sent back once with a note to make it pass; if it still did not, the report says so. One that cannot run commands is told the caller runs it.
+`files` and `check` are added to the task it gets. With `files`, its permission view denies writes outside them, so parallel sub-agents cannot step on each other or on the shared files the caller connects them in (commands it runs are not limited by this). `files` with an extglob that repeats its branch (`+(...)`, `*(...)`) is refused before the sub-agent starts: picomatch, which matches them, can take exponential time on some of them (GHSA-fc5q-39xc-vjpf, no fix through 4.0.7; `+(*a)` takes about a second on a 28-character path and doubles every few characters more), and heaw would block on each write it checks. The model writes these globs, and plain ones do the job; heaw's own patterns and the default rules have none. With `check`, a sub-agent that can run commands and reports while the last run of that command (alone or in a chained line) did not pass is sent back once with a note to make it pass; if it still did not, the report says so. One that cannot run commands is told the caller runs it.
 
 Limits the engine enforces:
 
@@ -534,7 +534,7 @@ Read-only mounts over the project, for those that exist: the config files, `.mcp
 ### 4.14 Observability
 
 - The session log is the base trace: every model call, tool call, approval and sub-agent run with timings and usage.
-- **Usage and cost** per model call, run and session, from list prices in the model catalog or `models[…].pricing` (USD per million tokens; cached input at its own price). A catalog price applies only to that exact model or a dated version of it, never to a family, since `gpt-5.4` and `gpt-5` cost different amounts. Long-context surcharges are not modelled. Without a price, costs are shown as unknown, with how to set one. `/cost`, the status bar and the `heaw run` summary show it.
+- **Usage and cost** per model call, run and session, from list prices in the model catalog or `models[…].pricing` (USD per million tokens; cached input at its own price). A catalog price applies only to that exact model or a dated version of it, never to a family, since `gpt-5.4` and `gpt-5` cost different amounts. Long-context surcharges are not modelled. The catalog has the current models of OpenAI, Anthropic and Google (prices checked against their price pages on 18 November 2026); where a provider announced a higher price within weeks, it has that one, since a cost limit that stops early beats one that stops late. Without a price, costs are shown as unknown, with how to set one. `/cost`, the status bar and the `heaw run` summary show it.
 - Optional **OpenTelemetry** traces over OTLP/HTTP (JSON), following the GenAI semantic conventions, so Jaeger, Langfuse, Phoenix, Grafana Tempo and similar show them without configuration. Spans: `invoke_agent <agent>` per run (`gen_ai.agent.name`, `gen_ai.conversation.id`), `chat <model>` per model call (`gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.usage.input_tokens` / `output_tokens`, `heaw.cost_usd`), `execute_tool <tool>` per tool call (`gen_ai.tool.name`, `gen_ai.tool.call.id`, `heaw.tool.status`). A sub-agent's run is a child of the `delegate` call that started it. Approvals, compaction, hook interventions and errors are span events. Prompts, answers and tool arguments and results are recorded only with `captureContent`.
 - **What went wrong:** `session_report` (§4.8) condenses a saved session for the agent, so `/retro` can turn its failures into harness changes.
 - **Where the tokens go:** `/cost` (`Session.usageBreakdown`) shows the number of model calls and the largest request, the tools whose results fill the conversation (every later request resends them), and calls repeated with the same arguments, the usual causes of rising cost. Resumed sessions rebuild it from the log.
@@ -607,14 +607,14 @@ checks:
 
 ## 5. Project configuration
 
-`heaw.config.ts` — typed, can import custom tools and hooks directly. Loaded with `jiti`; its `import ... from 'harness-engineered-agentic-workflow'` is pointed at the running heaw, so a project does not need the package installed (installing it as a dev dependency only adds editor type checking). Every setting is validated, and errors name the file and the setting.
+`heaw.config.ts` — typed, can import custom tools and hooks directly. Loaded with `jiti`; its `import ... from 'heaw'` is pointed at the running heaw, so a project does not need the package installed (installing it as a dev dependency only adds editor type checking). Every setting is validated, and errors name the file and the setting.
 
 Credentials are never written into config: `env('NAME')` refers to an environment variable and is read only when that provider is actually used, so an unused provider with a missing variable does not get in the way. A missing variable is reported with the setting that needs it. Built-in provider names (`azure`, `openai`, …) fall back to their usual environment variables; custom names (`azure-eu`, `lmstudio`) never do, so a second resource cannot silently use the first one's key.
 
 The project root is found like git finds a repository: the nearest directory upwards with a heaw config file or `.heaw/`, else the git root, else the current directory (the personal `~/.heaw/` never makes the home directory a project). Tools, sessions and `.env` all use the project root, so heaw behaves the same from any subfolder.
 
 ```ts
-import { defineConfig, env } from 'harness-engineered-agentic-workflow';
+import { defineConfig, env } from 'heaw';
 import { searchTickets } from './.heaw/tools/search-tickets.js';
 
 export default defineConfig({
@@ -675,7 +675,7 @@ A complete setup for a software project that reads user stories from Jira and op
 Single npm package for v1, with internal folders mirroring the layers so it can be split later if needed.
 
 ```
-harness-engineered-agentic-workflow/
+heaw/
 ├── src/
 │   ├── core/            # loop, messages, events, context, permissions, hooks, sessions, agents
 │   ├── providers/       # ModelClient interface impls: ai-sdk adapter, catalog, scripted
@@ -702,7 +702,7 @@ harness-engineered-agentic-workflow/
 ## 7. Library API
 
 ```ts
-import { createEngine } from 'harness-engineered-agentic-workflow';
+import { createEngine } from 'heaw';
 
 const { items: agents } = await loadAgentDefinitions({ projectRoot, heawHome });
 const engine = await createEngine({ model: 'azure:gpt-5.4', agents });

@@ -6,7 +6,7 @@
 | [`release-notes.ts`](release-notes.ts) | A fixed workflow: a custom tool and two agents defined in code, run with `runAgent` |
 
 ```sh
-npm install harness-engineered-agentic-workflow zod
+npm install heaw zod
 node --env-file=.env chat.ts
 node --env-file=.env release-notes.ts v1.2.0
 ```

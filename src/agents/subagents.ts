@@ -38,6 +38,14 @@ const DEFAULT_MAX_PARALLEL = 4;
 const DEFAULT_LIMITS: Partial<RunLimits> = { maxTurns: 50 };
 const DEFAULT_MIN_BUDGET = { costUsd: 0.5, tokens: 30_000 };
 
+/**
+ * An extglob that repeats its branch, `+(...)` or `*(...)`. picomatch (through 4.0.7, no fix yet:
+ * GHSA-fc5q-39xc-vjpf) can take exponential time to match some of them, `+(*a)` about a second
+ * on a 28-character path and doubling every few characters more, which blocks heaw while the
+ * sub-agent's writes are checked. The model writes these globs and plain ones do the job.
+ */
+const REPEATED_EXTGLOB = /[+*]\(/;
+
 type Budget = { tokens?: number; costUsd?: number };
 
 /** What the engine needs to build a sub-agent's session. */
@@ -133,6 +141,15 @@ export function delegateTool(options: {
         const names = options.agents.map((agent) => agent.name).join(', ') || 'none';
         return {
           output: `There is no agent named "${args.agent}". Named agents: ${names}. Omit agent for a general sub-agent.`,
+          isError: true,
+        };
+      }
+      const slow = args.files?.find((glob) => REPEATED_EXTGLOB.test(glob));
+      if (slow) {
+        return {
+          output:
+            `Not started: "${slow}" repeats a pattern with +( ) or *( ), which can take minutes ` +
+            'to match a path. Give the files as plain globs, e.g. ["src/billing/**", "test/billing.test.ts"].',
           isError: true,
         };
       }

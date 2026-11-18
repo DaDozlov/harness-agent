@@ -9,11 +9,7 @@ import { execFile } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { z } from 'zod';
-import {
-  createEngine,
-  defineTool,
-  type AgentDefinition,
-} from 'harness-engineered-agentic-workflow';
+import { createEngine, defineTool, type AgentDefinition } from 'heaw';
 
 // A read-only tool: no approval needed, and the agents need no shell access to use it.
 const commits = defineTool({

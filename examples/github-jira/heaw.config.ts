@@ -1,4 +1,4 @@
-import { defineConfig, env } from 'harness-engineered-agentic-workflow';
+import { defineConfig, env } from 'heaw';
 
 /**
  * An agent that implements Jira stories and opens GitHub pull requests. MCP servers are in

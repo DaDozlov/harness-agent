@@ -1,5 +1,5 @@
 {
-  "name": "harness-engineered-agentic-workflow",
+  "name": "heaw",
   "version": "0.0.0",
   "description": "A provider-agnostic, extensible agent harness for TypeScript: agent loop, tools, MCP, permissions, hooks, sub-agents and a CLI.",
   "keywords": [
@@ -79,7 +79,6 @@
     "@eslint/js": "^10.0.1",
     "@modelcontextprotocol/node": "^2.1.2",
     "@modelcontextprotocol/server": "^2.4.0",
-    "@types/marked-terminal": "^6.1.1",
     "@types/node": "^22.20.5",
     "@types/picomatch": "^4.0.3",
     "@types/react": "^19.3.0",

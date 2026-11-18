@@ -1,6 +1,6 @@
 {
   // Develop heaw in a container: Node 24, git, and Docker inside for the Docker workspace tests.
-  "name": "harness-engineered-agentic-workflow",
+  "name": "heaw",
   "build": {
     "dockerfile": "../Dockerfile",
     "context": "..",

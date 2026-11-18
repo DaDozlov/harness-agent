@@ -111,7 +111,7 @@ describe('check_config', () => {
   it('summarizes a configuration that loads', async () => {
     const root = await project(
       [
-        "import { defineConfig } from 'harness-engineered-agentic-workflow';",
+        "import { defineConfig } from 'heaw';",
         'export default defineConfig({',
         "  model: 'ollama:test',",
         "  permissions: { mode: 'accept-edits', allow: ['run_command(npm test*)'] },",

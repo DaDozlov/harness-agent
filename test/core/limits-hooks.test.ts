@@ -120,6 +120,22 @@ describe('usage and cost', () => {
     expect(capabilitiesFor('my-deployment').pricing).toBeUndefined();
   });
 
+  it('knows the current models of each provider, with the context of their family', () => {
+    expect(capabilitiesFor('claude-sonnet-5-5')).toMatchObject({
+      contextWindow: 1_000_000,
+      pricing: { input: 2, cacheRead: 0.1, output: 10 },
+    });
+    expect(capabilitiesFor('claude-haiku-4-5').contextWindow).toBe(200_000);
+    expect(capabilitiesFor('gpt-6.2-sol')).toMatchObject({
+      contextWindow: 1_050_000,
+      pricing: { input: 2, output: 10 },
+    });
+    expect(capabilitiesFor('gemini-3.8-flash')).toMatchObject({
+      contextWindow: 1_048_576,
+      pricing: { output: 7.5 },
+    });
+  });
+
   it('reports the cost of each call, each run and the session', async () => {
     const { session } = await setup(
       [

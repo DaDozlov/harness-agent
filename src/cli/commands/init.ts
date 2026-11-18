@@ -133,11 +133,11 @@ function verificationTemplate(tests: string): string {
 }
 
 function configTemplate(model: string, tests: string | undefined): string {
-  return `import { defineConfig } from 'harness-engineered-agentic-workflow';
+  return `import { defineConfig } from 'heaw';
 
 // heaw settings for this project. Credentials never go here: put them in .env and refer to them
 // with env('NAME') (import { defineConfig, env } from the same package).
-// For type checking in your editor: npm i -D harness-engineered-agentic-workflow
+// For type checking in your editor: npm i -D heaw
 export default defineConfig({
   // provider:model. For Azure, the model part is your deployment name.
   model: '${model}',
