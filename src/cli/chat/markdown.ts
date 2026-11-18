@@ -6,7 +6,7 @@ const LIST_INDENT = '  ';
 
 const marked = new Marked(
   // Ink wraps lines itself, so marked-terminal must not reflow them as well.
-  markedTerminal({ reflowText: false, tab: 2, emoji: false }) as Parameters<Marked['use']>[0],
+  markedTerminal({ reflowText: false, tab: 2, emoji: false }),
   {
     renderer: {
       list(this: RendererThis, token: Tokens.List) {
