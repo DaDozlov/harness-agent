@@ -4,10 +4,13 @@ heaw (harness-engineered agentic workflow) is an AI coding agent for your termin
 
 ## Requirements
 
+heaw runs on Windows, macOS and Linux. Its tests run on all three, with Node.js 22 and 24, on every change. You need:
+
 - Node.js 22.12 or newer, and Git
 - A model: an API key for Azure OpenAI, OpenAI, Anthropic or Google, or a local Ollama
-- Windows: Git for Windows (the agent runs commands in Git Bash)
+- On Windows: Git for Windows (the agent runs commands in Git Bash). On macOS and Linux it uses your bash or zsh.
 - Optional: Docker, to run the agent's commands in a container
+- Optional, for the browser tester `/setup` offers for web apps: Chrome, or Edge on Windows
 
 ## Installation
 
