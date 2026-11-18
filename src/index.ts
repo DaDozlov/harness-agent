@@ -1,7 +1,7 @@
 // Public library API. It grows milestone by milestone (docs/DESIGN.md §7 and §11).
 export { VERSION } from './version.js';
 
-// Config files: import { defineConfig, env } from 'heaw'.
+// Config files: import { defineConfig, env } from '@dadozlov/heaw'.
 export { defineConfig, type DockerWorkspaceConfig, type HeawConfig } from './config/define.js';
 export {
   env,

@@ -8,7 +8,7 @@
  * `heaw mcp login atlassian`. The tool names are those of Atlassian's MCP server at the time of
  * writing; `heaw mcp test atlassian` lists the current ones.
  */
-import { createProjectEngine } from 'heaw';
+import { createProjectEngine } from '@dadozlov/heaw';
 
 const project = process.argv[2] ?? 'PROJ';
 // The intent is saved with each session, so `heaw sessions` can tell implementation work apart.

@@ -1,4 +1,4 @@
-import { defineConfig, env } from 'heaw';
+import { defineConfig, env } from '@dadozlov/heaw';
 
 /**
  * An agent that implements Jira stories and opens GitHub pull requests. MCP servers are in

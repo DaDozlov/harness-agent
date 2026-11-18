@@ -59,7 +59,7 @@ describe('loadConfig', () => {
     const project = await tempDir();
     await files(project, {
       'heaw.config.ts': [
-        "import { defineConfig, env } from 'heaw';",
+        "import { defineConfig, env } from '@dadozlov/heaw';",
         "const shell: string = 'pwsh';",
         'export default defineConfig({',
         "  model: 'azure:my-deployment',",
@@ -85,22 +85,24 @@ describe('loadConfig', () => {
     });
   });
 
-  it("loads a config that imports from the package's name before its first release", async () => {
-    const project = await tempDir();
-    await files(project, {
-      'heaw.config.ts': [
-        "import { defineConfig } from 'harness-engineered-agentic-workflow';",
-        "export default defineConfig({ model: 'openai:gpt-5' });",
-      ].join('\n'),
-    });
+  it("loads configs that import from the package's names before its first release", async () => {
+    for (const name of ['harness-engineered-agentic-workflow', 'heaw']) {
+      const project = await tempDir();
+      await files(project, {
+        'heaw.config.ts': [
+          `import { defineConfig } from '${name}';`,
+          "export default defineConfig({ model: 'openai:gpt-5' });",
+        ].join('\n'),
+      });
 
-    const loaded = await loadConfig({
-      cwd: project,
-      env: { HEAW_HOME: join(project, 'no-home') },
-      packageEntry: PACKAGE_ENTRY,
-    });
+      const loaded = await loadConfig({
+        cwd: project,
+        env: { HEAW_HOME: join(project, 'no-home') },
+        packageEntry: PACKAGE_ENTRY,
+      });
 
-    expect(loaded.config.model).toBe('openai:gpt-5');
+      expect(loaded.config.model, name).toBe('openai:gpt-5');
+    }
   });
 
   it('combines personal and project settings', async () => {

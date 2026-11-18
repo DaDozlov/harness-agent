@@ -133,11 +133,11 @@ function verificationTemplate(tests: string): string {
 }
 
 function configTemplate(model: string, tests: string | undefined): string {
-  return `import { defineConfig } from 'heaw';
+  return `import { defineConfig } from '@dadozlov/heaw';
 
 // heaw settings for this project. Credentials never go here: put them in .env and refer to them
 // with env('NAME') (import { defineConfig, env } from the same package).
-// For type checking in your editor: npm i -D heaw
+// For type checking in your editor: npm i -D @dadozlov/heaw
 export default defineConfig({
   // provider:model. For Azure, the model part is your deployment name.
   model: '${model}',

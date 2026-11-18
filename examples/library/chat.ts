@@ -6,7 +6,7 @@
  */
 import { stdin, stdout } from 'node:process';
 import { createInterface } from 'node:readline/promises';
-import { createEngine, type ApprovalDecision, type EngineEvent } from 'heaw';
+import { createEngine, type ApprovalDecision, type EngineEvent } from '@dadozlov/heaw';
 
 const engine = await createEngine({
   model: process.env.HEAW_MODEL ?? 'azure:gpt-5.4',

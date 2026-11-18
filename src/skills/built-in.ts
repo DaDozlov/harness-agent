@@ -113,7 +113,7 @@ export const SETUP_HARNESS_SKILL: Skill = {
     '**heaw.config.ts**: keep what is there (the import line, the `model`, other settings and the comments that explain them) and change only what the answers call for. Use exactly these settings; invent none:',
     '',
     '```ts',
-    "import { defineConfig, env } from 'heaw';",
+    "import { defineConfig, env } from '@dadozlov/heaw';",
     '',
     'export default defineConfig({',
     "  model: 'azure:gpt-5.4',                          // keep the one that is there",

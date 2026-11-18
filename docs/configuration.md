@@ -5,7 +5,7 @@ The quickest way to a working setup: `heaw`, then `/setup`. The agent asks about
 ## `heaw.config.ts`
 
 ```ts
-import { defineConfig, env } from 'heaw';
+import { defineConfig, env } from '@dadozlov/heaw';
 export default defineConfig({ /* settings below */ });
 ```
 

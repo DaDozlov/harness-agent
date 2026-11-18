@@ -1,4 +1,4 @@
-import { defineConfig, env } from 'heaw';
+import { defineConfig, env } from '@dadozlov/heaw';
 
 const SHOP_API = 'http://localhost:4010';
 const MAX_REFUND_EUR = 100;

@@ -10,7 +10,7 @@ import { createProgram } from './program.js';
 const dotenv = join(findProjectRoot(process.cwd()), '.env');
 if (existsSync(dotenv)) process.loadEnvFile(dotenv);
 
-// Config files import from 'heaw'; they get this running copy, so
+// Config files import from '@dadozlov/heaw'; they get this running copy, so
 // projects need not install the package. dist/cli.js sits next to dist/index.js.
 const packageEntry = fileURLToPath(new URL('./index.js', import.meta.url));
 

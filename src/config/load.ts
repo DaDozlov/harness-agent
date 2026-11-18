@@ -17,7 +17,7 @@ export interface LoadConfigOptions {
   /** The user's home directory, for finding the project root. */
   userHome?: string;
   /**
-   * Where `import ... from 'heaw'` in a config file points. A globally installed heaw passes
+   * Where `import ... from '@dadozlov/heaw'` in a config file points. A globally installed heaw passes
    * itself, so projects need not install the package.
    */
   packageEntry?: string;
@@ -40,8 +40,9 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Loade
     interopDefault: true,
     ...(options.packageEntry && {
       alias: {
+        '@dadozlov/heaw': options.packageEntry,
+        // Names the package had before its first release, in configs written then.
         heaw: options.packageEntry,
-        // The package's name before its first release, in configs written then.
         'harness-engineered-agentic-workflow': options.packageEntry,
       },
     }),

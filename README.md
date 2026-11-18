@@ -15,10 +15,10 @@ heaw runs on Windows, macOS and Linux. Its tests run on all three, with Node.js 
 ## Installation
 
 ```bash
-npm install -g heaw
+npm install -g @dadozlov/heaw
 ```
 
-This adds the `heaw` command. To use heaw as a library in your own code: `npm install heaw`.
+This adds the `heaw` command. To use heaw as a library in your own code: `npm install @dadozlov/heaw`.
 
 To run the latest code instead, install from source:
 

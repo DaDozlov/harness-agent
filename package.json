@@ -1,5 +1,5 @@
 {
-  "name": "heaw",
+  "name": "@dadozlov/heaw",
   "version": "1.0.0",
   "description": "A provider-agnostic, extensible agent harness for TypeScript: agent loop, tools, MCP, permissions, hooks, sub-agents and a CLI.",
   "keywords": [
@@ -37,6 +37,9 @@
   ],
   "engines": {
     "node": ">=22.12"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsdown",

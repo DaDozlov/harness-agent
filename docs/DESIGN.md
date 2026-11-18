@@ -1,7 +1,7 @@
 # heaw (harness-engineered agentic workflow) — Design (v1)
 
 > Status: **v1 built** (M0–M9 done). The doc describes the harness as built; decisions made while building are recorded in the sections and in §13.
-> Package and CLI: `heaw` · License: MIT
+> Package: `@dadozlov/heaw` · CLI: `heaw` · License: MIT
 
 ## 1. What this is
 
@@ -607,14 +607,14 @@ checks:
 
 ## 5. Project configuration
 
-`heaw.config.ts` — typed, can import custom tools and hooks directly. Loaded with `jiti`; its `import ... from 'heaw'` is pointed at the running heaw, so a project does not need the package installed (installing it as a dev dependency only adds editor type checking). Every setting is validated, and errors name the file and the setting.
+`heaw.config.ts` — typed, can import custom tools and hooks directly. Loaded with `jiti`; its `import ... from '@dadozlov/heaw'` is pointed at the running heaw, so a project does not need the package installed (installing it as a dev dependency only adds editor type checking). Every setting is validated, and errors name the file and the setting.
 
 Credentials are never written into config: `env('NAME')` refers to an environment variable and is read only when that provider is actually used, so an unused provider with a missing variable does not get in the way. A missing variable is reported with the setting that needs it. Built-in provider names (`azure`, `openai`, …) fall back to their usual environment variables; custom names (`azure-eu`, `lmstudio`) never do, so a second resource cannot silently use the first one's key.
 
 The project root is found like git finds a repository: the nearest directory upwards with a heaw config file or `.heaw/`, else the git root, else the current directory (the personal `~/.heaw/` never makes the home directory a project). Tools, sessions and `.env` all use the project root, so heaw behaves the same from any subfolder.
 
 ```ts
-import { defineConfig, env } from 'heaw';
+import { defineConfig, env } from '@dadozlov/heaw';
 import { searchTickets } from './.heaw/tools/search-tickets.js';
 
 export default defineConfig({
@@ -702,7 +702,7 @@ heaw/
 ## 7. Library API
 
 ```ts
-import { createEngine } from 'heaw';
+import { createEngine } from '@dadozlov/heaw';
 
 const { items: agents } = await loadAgentDefinitions({ projectRoot, heawHome });
 const engine = await createEngine({ model: 'azure:gpt-5.4', agents });

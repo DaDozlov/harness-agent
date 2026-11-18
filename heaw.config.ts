@@ -1,4 +1,4 @@
-import { defineConfig } from 'heaw';
+import { defineConfig } from '@dadozlov/heaw';
 
 /**
  * heaw's own setup: for working on this repository with heaw, and for its eval suite (evals/),

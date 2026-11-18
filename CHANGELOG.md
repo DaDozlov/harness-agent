@@ -1,4 +1,4 @@
-# heaw
+# @dadozlov/heaw
 
 ## 1.0.0
 
@@ -16,7 +16,7 @@
   
   If you ran heaw from source before this release:
   
-  - The package is now called `heaw`. Configs that import from `harness-engineered-agentic-workflow` still load.
+  - The package is now called `@dadozlov/heaw` (the command is still `heaw`). Configs that import from `harness-engineered-agentic-workflow` or `heaw` still load.
   - Pass `signal` to `workspace.exec` in your hooks, so Esc stops the tests too: `async beforeStop({ workspace, signal }) { await workspace.exec('npm test', { signal }) }`.
   - Add `maxRuns: 2` to a reviewer written before. For a tester written before, run `/setup` again.
   - An allow rule such as `run_command(npm test*)` no longer allows `npm test > file`; a command that needs a secret variable gets it through `workspace.passEnv`, e.g. `['GH_TOKEN']`; an unattended run in `bypass` mode uses the Docker workspace unless the config sets `workspace: { type: 'local' }`.

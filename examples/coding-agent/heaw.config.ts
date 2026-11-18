@@ -1,6 +1,6 @@
 import { appendFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { defineConfig } from 'heaw';
+import { defineConfig } from '@dadozlov/heaw';
 
 /**
  * A coding agent whose work is checked: syntax right after each edit, the tests before it may
