@@ -1,0 +1,31 @@
+description: >-
+  A request whose deciding fact is only in the user's head: "the file for that import" of an
+  accounting system. (Asking for "a CSV file" made commas the spec: three trials of three wrote
+  them, none asked.) The repository reads a comma-separated feed from the bank, a tempting model for the
+  export, but the accounting import wants semicolons, decimal commas and CRLF. A simulated user
+  holds that fact and gives it only when asked about the format (docs/DESIGN.md §4.16). An agent
+  that guesses fails; one that asks the deciding question passes.
+fixture: ./fixtures/orders-export
+prompt: >-
+  Our accounting system has to import the orders. Implement exportOrders() in src/export.js so it
+  returns the file for that import, with a test.
+user:
+  facts:
+    - id: format
+      fact: >-
+        The accounting import reads semicolon-separated values: a header line id;customer;total,
+        totals in euros with a decimal comma (12,50), CRLF line endings, and a field that contains
+        a semicolon wrapped in double quotes. The comma format in src/import.js is the bank's
+        feed, a different system.
+    - id: encoding
+      fact: UTF-8 without a byte order mark is fine.
+  replies: 2
+limits:
+  maxTurns: 25
+  maxCostUsd: 0.5
+checks:
+  - command: npm test
+  - command: node --test acceptance/export.test.js
+    files: ./checks/asks-the-user
+  # The agent asked the question that decides the outcome, rather than guessing right.
+  - disclosed: format

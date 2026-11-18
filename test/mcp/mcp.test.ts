@@ -275,8 +275,12 @@ describe('MCP servers over stdio', () => {
     await call(toolNamed(manager, 'mcp__test__crash'), {}).catch(() => undefined);
     await expect.poll(() => manager.statuses()[0]?.status, { timeout: 5_000 }).toBe('failed');
 
-    expect(manager.statuses()[0]?.error).toMatch(/stopped/);
+    expect(manager.statuses()[0]?.error).toMatch(/stopped; heaw connects again in 2 s/);
     expect(manager.tools()).toEqual([]);
+
+    // A server that crashed once comes back by itself, with its tools.
+    await expect.poll(() => manager.statuses()[0]?.status, { timeout: 10_000 }).toBe('connected');
+    expect(manager.tools().length).toBeGreaterThan(0);
   });
 
   it('reports a server that cannot start, without affecting the others', async () => {
@@ -388,6 +392,23 @@ describe('MCP in the engine', () => {
     expect(model.requests[1]?.messages.at(-1)?.content[0]).toMatchObject({
       output: from('test', 'echo: hello'),
     });
+  });
+
+  it("tells the model which of the project's servers are down, so it does not guess why tools are missing", async () => {
+    const model = new ScriptedModelClient([{ text: 'ok' }]);
+    const engine = await createEngine({
+      model,
+      toolsets: [],
+      interactive: false,
+      mcp: { servers: [entry('broken', { command: 'definitely-not-a-real-command-heaw' })] },
+    });
+
+    await collect(engine.session().send('Open the ticket'));
+    await engine.dispose();
+
+    expect(model.requests[0]?.system).toMatch(
+      /The MCP server "broken" is not available \(.+\), so its tools are missing for now\./,
+    );
   });
 
   it('asks before MCP calls by default, so a one-shot run is denied with the rule to allow it', async () => {

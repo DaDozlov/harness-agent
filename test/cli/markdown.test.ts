@@ -24,6 +24,15 @@ describe('renderMarkdown', () => {
     expect(plain(renderMarkdown('1. a\n2. b\n3. c'))).toMatch(/1\. a\n\s+2\. b\n\s+3\. c/);
   });
 
+  it('shows colons in the inline code of list items', () => {
+    const text = '- allowed: `run_command(curl -I --max-time * http://localhost:*)`';
+
+    const shown = plain(renderMarkdown(text));
+
+    expect(shown).toContain('run_command(curl -I --max-time * http://localhost:*)');
+    expect(shown).not.toContain('#COLON');
+  });
+
   it('nests lists by their depth, numbers only their own items, and renders their inline Markdown', () => {
     const text = [
       'Changed:',

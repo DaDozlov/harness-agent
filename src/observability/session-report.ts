@@ -298,7 +298,8 @@ function sentBack(events: EngineEvent[], runs: Run[]): string | undefined {
     (event): event is Of<'hook'> => event.type === 'hook' && event.hook === 'beforeStop',
   );
   const stuck = runs.filter((run) => run.end?.stopReason === 'check_failed').length;
-  if (!hooks.length && !stuck) return undefined;
+  const capped = runs.filter((run) => run.end?.stopReason === 'check_limit').length;
+  if (!hooks.length && !stuck && !capped) return undefined;
   const lines = grouped(
     hooks.map((event) => {
       const kind = event.builtIn
@@ -312,9 +313,13 @@ function sentBack(events: EngineEvent[], runs: Run[]): string | undefined {
       };
     }),
   );
-  const ended = stuck
-    ? `\n${stuck} run${stuck === 1 ? '' : 's'} ended because the same check kept failing (check_failed).`
-    : '';
+  const ended =
+    (stuck
+      ? `\n${stuck} run${stuck === 1 ? '' : 's'} ended because the same check kept failing (check_failed).`
+      : '') +
+    (capped
+      ? `\n${capped} run${capped === 1 ? '' : 's'} ended because the checks sent the agent back too often (check_limit).`
+      : '');
   return `## Sent back before finishing (${hooks.length})\n${lines.join('\n')}${ended}`;
 }
 

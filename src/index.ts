@@ -115,6 +115,7 @@ export {
   PROTECTED_PATHS,
   type PermissionCheck,
   type PermissionMode,
+  type PermissionRule,
   type PermissionRules,
   type PermissionSummary,
 } from './core/permissions.js';

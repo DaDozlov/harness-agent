@@ -121,5 +121,6 @@ function cost(item: CaseResult | undefined): string {
 function summary(report: EvalReport): string {
   const price = report.costUsd === undefined ? '' : ` · $${report.costUsd.toFixed(4)}`;
   const took = ` · ${Math.round(report.durationMs / 60_000)} min`;
-  return `${report.passed}/${report.total} passed · ${report.model}${price}${took} · ${localTime(report.startedAt)}`;
+  const without = report.without?.length ? ` · without ${report.without.join(', ')}` : '';
+  return `${report.passed}/${report.total} passed · ${report.model}${price}${took}${without} · ${localTime(report.startedAt)}`;
 }

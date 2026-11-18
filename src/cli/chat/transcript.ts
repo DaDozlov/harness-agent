@@ -408,6 +408,12 @@ const STOP_NOTES: Partial<Record<StopReason, { text: string; tone: 'info' | 'war
       'the check cannot run here. Fix what it reports, or the check (heaw.config.ts, then /reload).',
     tone: 'warning',
   },
+  check_limit: {
+    text:
+      'Stopped: the checks before finishing sent the agent back 5 times in this message, each ' +
+      'time with something new. Their last report is above: send a message to go on with it.',
+    tone: 'warning',
+  },
 };
 
 /**

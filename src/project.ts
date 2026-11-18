@@ -1,9 +1,12 @@
 import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { RunLimits } from './core/loop.js';
 import type { PermissionMode } from './core/permissions.js';
 import { isSecretName, Redactor, referencedVariables, secretsFromEnv } from './core/redact.js';
 import type { Workspace } from './core/workspace.js';
+import { invisibleWarnings } from './config/invisible.js';
+import { MEMORY_FILE } from './tools/memory.js';
 import { loadInstructions } from './config/instructions.js';
 import type { HeawConfig } from './config/define.js';
 import { loadConfig, type LoadedConfig } from './config/load.js';
@@ -139,6 +142,27 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     loadAgentDefinitions({ projectRoot, heawHome: home }),
     loadSkills({ projectRoot, heawHome: home }),
   ]);
+  const instructions = await loadInstructions({ projectRoot, heawHome: home });
+  // What tells the agent what to do, checked for characters the user cannot see.
+  const hidden = invisibleWarnings([
+    ...instructions,
+    ...agents.items.map((agent) => ({
+      source: agent.source,
+      text: `${agent.description}
+${agent.prompt}`,
+    })),
+    ...(await Promise.all(
+      skills.items.map(async (skill) => ({
+        source: join(skill.shownDir, 'SKILL.md'),
+        text:
+          skill.content ?? (await readFile(join(skill.dir, 'SKILL.md'), 'utf8').catch(() => '')),
+      })),
+    )),
+    {
+      source: MEMORY_FILE,
+      text: await readFile(join(projectRoot, MEMORY_FILE), 'utf8').catch(() => ''),
+    },
+  ]);
   const limits = { ...config.limits, ...definedOnly(options.limits ?? {}) };
   const fileTools = options.tools !== false && (config.toolsets ?? DEFAULT_TOOLSETS).includes('fs');
   // Read by session_report (the retro skill) even when new sessions are not saved.
@@ -156,7 +180,7 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
       preapproved: options.allow ?? [],
       deny: [...(config.permissions?.deny ?? []), ...(options.deny ?? [])],
     },
-    instructions: await loadInstructions({ projectRoot, heawHome: home }),
+    instructions,
     ...(options.tools === false
       ? { toolsets: [] }
       : config.toolsets && { toolsets: config.toolsets }),
@@ -209,6 +233,7 @@ export async function loadProject(options: ProjectOptions = {}): Promise<Project
     loaded,
     warnings: [
       ...leftovers,
+      ...hidden,
       ...agents.problems,
       ...skills.problems,
       ...(unattendedBypass ? [IN_DOCKER] : []),

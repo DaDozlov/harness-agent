@@ -211,3 +211,55 @@ describe('Session', () => {
     await first.return(undefined as never);
   });
 });
+
+describe('messages the user writes during a run', () => {
+  it('reach the agent before its next model call', async () => {
+    const { model, session } = setup([
+      { toolCalls: [{ name: 'note', args: {} }] },
+      { text: 'Done, in blue.' },
+    ]);
+    const events: EngineEvent[] = [];
+    for await (const event of session.send('Paint the button')) {
+      events.push(event);
+      // Typed while the tool runs.
+      if (event.type === 'tool.start') session.queue('Make it blue, not red.');
+    }
+
+    const second = textOf(model.requests[1]!.messages.at(-1)!);
+    expect(second).toContain('Make it blue, not red.');
+    expect(second).toContain('[heaw: the user wrote this while you were working');
+    expect(events.filter((event) => event.type === 'input.delivered')).toHaveLength(1);
+    expect(runEnd(events)).toMatchObject({ stopReason: 'end_turn', turns: 2 });
+    expect(session.takeQueued()).toEqual([]);
+  });
+
+  it('keep the run going when they arrive as the agent finishes', async () => {
+    const { model, session } = setup([{ text: 'Done.' }, { text: 'Added the footer too.' }]);
+    const events: EngineEvent[] = [];
+    for await (const event of session.send('Write the page')) {
+      events.push(event);
+      if (event.type === 'message.complete' && events.every((e) => e.type !== 'input.delivered')) {
+        session.queue('Also add a footer.');
+      }
+    }
+
+    expect(model.requests).toHaveLength(2);
+    expect(textOf(model.requests[1]!.messages.at(-1)!)).toContain('Also add a footer.');
+    expect(runEnd(events)).toMatchObject({ stopReason: 'end_turn', turns: 2 });
+  });
+});
+
+describe('the nudge for unfinished answers', () => {
+  it('can be switched off, to measure what it is worth', async () => {
+    const on = setup([{ text: 'Let me also run the tests:' }, { text: 'Done.' }]);
+    const off = setup([{ text: 'Let me also run the tests:' }, { text: 'Done.' }], {
+      nudgeUnfinished: false,
+    });
+
+    await collect(on.session.send('Fix it'));
+    await collect(off.session.send('Fix it'));
+
+    expect(on.model.requests).toHaveLength(2);
+    expect(off.model.requests).toHaveLength(1);
+  });
+});

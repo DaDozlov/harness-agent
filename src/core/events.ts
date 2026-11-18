@@ -33,6 +33,8 @@ export type ApprovalDecision =
  * - `blocked`: a `userPrompt` hook rejected the input.
  * - `check_failed`: a `beforeStop` check failed the same way several times in a row, so the
  *   agent is stuck (or the check cannot run) and a person has to look.
+ * - `check_limit`: `beforeStop` checks sent the agent back too often in one run, each time with
+ *   something else: the work is not converging, and a person should see what is left.
  */
 export type StopReason =
   | 'end_turn'
@@ -43,6 +45,7 @@ export type StopReason =
   | 'time_limit'
   | 'blocked'
   | 'check_failed'
+  | 'check_limit'
   | 'content_filter'
   | 'aborted'
   | 'error';
@@ -159,6 +162,8 @@ export type EngineEventBody =
       /** How often it failed the same way, or went back to earlier content. */
       count: number;
     }
+  /** What the user wrote while the run went on (`Session.queue`) reached the agent. */
+  | { type: 'input.delivered'; count: number }
   /**
    * A sub-agent started (docs/DESIGN.md §4.7). Its own events carry `parentAgentId`; `callId` is
    * the `delegate` call that started it, so a UI can show its progress on that call.

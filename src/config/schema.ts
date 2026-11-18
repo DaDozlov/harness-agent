@@ -69,6 +69,12 @@ const tool = z.custom<Tool>(
 );
 
 const rules = z.array(z.string()).optional();
+/** Deny and ask rules may say what to do instead (`PermissionRule`). */
+const rulesWithHints = z
+  .array(
+    z.union([z.string(), z.object({ rule: z.string().min(1), hint: z.string().min(1) }).strict()]),
+  )
+  .optional();
 
 const limits = z
   .object({
@@ -133,7 +139,12 @@ const configSchema = z
     toolsets: z.array(z.enum(Object.keys(TOOLSETS) as [string, ...string[]])).optional(),
     tools: z.array(tool).optional(),
     permissions: z
-      .object({ mode: z.enum(PERMISSION_MODES).optional(), allow: rules, ask: rules, deny: rules })
+      .object({
+        mode: z.enum(PERMISSION_MODES).optional(),
+        allow: rules,
+        ask: rulesWithHints,
+        deny: rulesWithHints,
+      })
       .strict()
       .optional(),
     limits: limits.optional(),

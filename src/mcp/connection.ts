@@ -40,6 +40,9 @@ export interface McpConnectionOptions {
   pins?: McpPins | undefined;
 }
 
+/** Pauses before each reconnect after a server stopped; then heaw gives up. */
+export const RECONNECT_DELAYS_MS = [2_000, 10_000, 30_000];
+
 /** One configured MCP server: connects, lists its tools, calls them. */
 export class McpConnection {
   readonly entry: McpServerEntry;
@@ -53,6 +56,11 @@ export class McpConnection {
   readonly #options: McpConnectionOptions;
   #client: Client | undefined;
   #stderr = '';
+  /** Closed on purpose: no reconnecting. */
+  #closed = false;
+  /** Reconnects tried since the server stopped. */
+  #retries = 0;
+  #retryTimer: NodeJS.Timeout | undefined;
 
   constructor(entry: McpServerEntry, options: McpConnectionOptions) {
     this.entry = entry;
@@ -92,9 +100,11 @@ export class McpConnection {
       this.tools = await listAllTools(this.#client!);
       this.held = this.#options.pins?.review(this.#pinKey, this.tools) ?? new Set();
       this.instructions = this.#client!.getInstructions()?.trim() || undefined;
+      this.#retries = 0;
       this.#set('connected');
     } catch (error) {
-      await this.close();
+      await this.#disconnect();
+      if (this.#closed) return;
       const oauth = isHttpServer(this.entry.config) && this.entry.config.oauth;
       const refused = error instanceof UnauthorizedError || httpStatusOf(error) === 401;
       if (refused && oauth) {
@@ -107,10 +117,31 @@ export class McpConnection {
           'failed',
           'the server refused the credentials (HTTP 401): check its token or headers, or set "oauth": true if it uses a login',
         );
+      } else if (this.#retries > 0) {
+        // Reconnecting after the server stopped: try again later, a few times.
+        this.#reconnectLater(describe(error) + this.#stderrTail());
       } else {
         this.#set('failed', describe(error) + this.#stderrTail());
       }
     }
+  }
+
+  /**
+   * After the server stopped: connects again after a pause, up to RECONNECT_DELAYS_MS.length
+   * times, then gives up with the reason. A server that crashed once (a browser that closed, a
+   * network blip) comes back without a /mcp reload; one that keeps failing does not loop.
+   */
+  #reconnectLater(reason: string): void {
+    if (this.#closed) return;
+    const delay = RECONNECT_DELAYS_MS[this.#retries];
+    if (delay === undefined) {
+      this.#set('failed', `${reason}; heaw tried ${this.#retries} times to connect again`);
+      return;
+    }
+    this.#retries++;
+    this.#set('failed', `${reason}; heaw connects again in ${delay / 1000} s`);
+    this.#retryTimer = setTimeout(() => void this.connect(), delay);
+    this.#retryTimer.unref();
   }
 
   async callTool(
@@ -127,7 +158,14 @@ export class McpConnection {
     return this.#client.callTool({ name, arguments: args }, { signal, timeout });
   }
 
+  /** Stops the server for good: no reconnecting. */
   async close(): Promise<void> {
+    this.#closed = true;
+    clearTimeout(this.#retryTimer);
+    await this.#disconnect();
+  }
+
+  async #disconnect(): Promise<void> {
     const client = this.#client;
     this.#client = undefined;
     if (client) {
@@ -145,7 +183,7 @@ export class McpConnection {
     } catch (error) {
       // Older servers only speak SSE. An explicit type, or an auth problem, is not a reason to try.
       if (config.type === 'http' || error instanceof UnauthorizedError) throw error;
-      await this.close();
+      await this.#disconnect();
       try {
         await this.#connectOver(this.#httpTransport('sse'));
         this.transport = 'sse';
@@ -160,9 +198,10 @@ export class McpConnection {
     const client = new Client(this.#options.clientInfo);
     this.#client = client;
     client.onclose = () => {
-      if (this.status !== 'connected') return;
+      if (this.status !== 'connected' || this.#closed) return;
       this.tools = [];
-      this.#set('failed', `the server stopped${this.#stderrTail()}`);
+      this.#client = undefined;
+      this.#reconnectLater(`the server stopped${this.#stderrTail()}`);
     };
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {

@@ -16,10 +16,17 @@ const marked = new Marked(
   },
 );
 
+/**
+ * What marked-terminal puts for a colon in inline code (to keep `:name:` from becoming an emoji)
+ * and puts back in the blocks it renders itself. Lists are rendered here, and a rule the agent
+ * quoted in one showed `*#COLON|*` for each colon of its URL.
+ */
+const COLON_PLACEHOLDER = /\*#COLON\|\*/g;
+
 /** Renders Markdown for the terminal: headings, emphasis, code blocks, lists, tables, links. */
 export function renderMarkdown(text: string): string {
   try {
-    return marked.parse(text, { async: false }).replace(/\n+$/, '');
+    return marked.parse(text, { async: false }).replace(COLON_PLACEHOLDER, ':').replace(/\n+$/, '');
   } catch {
     // Half-streamed Markdown can be odd; showing the raw text beats showing nothing.
     return text;

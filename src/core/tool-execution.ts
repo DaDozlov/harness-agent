@@ -203,8 +203,14 @@ async function* authorize(
     .catch((cause: unknown) => (cause instanceof Error ? cause.message : String(cause)));
   if (problem) return { finished: error(problem) };
 
-  // Permissions see the arguments as the hooks left them.
+  // Permissions see the arguments as the hooks left them, and whether a written file exists.
   const subject = subjectOf(tool, args, runtime.workspace);
+  if (subject?.type === 'path' && tool.kind === 'write') {
+    subject.exists = await runtime.workspace
+      .stat(subject.value)
+      .then((info) => info !== undefined)
+      .catch(() => undefined);
+  }
   const approved: Approved = { call, tool, args, subject };
   const check = runtime.permissions.check(tool, subject);
   // A hook may answer for the user, but not override a deny rule.

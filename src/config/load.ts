@@ -88,10 +88,10 @@ export function mergeConfigs(base: HeawConfig, override: HeawConfig): HeawConfig
   if (base.tools || override.tools)
     merged.tools = [...(base.tools ?? []), ...(override.tools ?? [])];
   if (base.permissions || override.permissions) {
-    const combine = (key: 'allow' | 'ask' | 'deny') => [
-      ...(base.permissions?.[key] ?? []),
-      ...(override.permissions?.[key] ?? []),
-    ];
+    const combine = <K extends 'allow' | 'ask' | 'deny'>(key: K) =>
+      [...(base.permissions?.[key] ?? []), ...(override.permissions?.[key] ?? [])] as NonNullable<
+        NonNullable<HeawConfig['permissions']>[K]
+      >;
     const mode = override.permissions?.mode ?? base.permissions?.mode;
     merged.permissions = {
       ...(mode && { mode }),

@@ -7,7 +7,7 @@ import tseslint from 'typescript-eslint';
 
 export default defineConfig(
   // The eval fixtures are what the agent works on, bugs included, not code of this project.
-  { ignores: ['dist/', 'coverage/', 'node_modules/', 'evals/fixtures/'] },
+  { ignores: ['dist/', 'coverage/', 'node_modules/', 'evals/fixtures/', 'evals/decoys/'] },
   js.configs.recommended,
   tseslint.configs.recommendedTypeChecked,
   { files: ['**/*.tsx'], extends: [reactHooks.configs.flat['recommended-latest']] },

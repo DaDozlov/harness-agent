@@ -206,8 +206,10 @@ const SUMMARY_SYSTEM =
   'without it. Write concise notes to the agent that keep: what the user asked for (quote ' +
   'exact instructions and requirements), decisions and why they were made, files read or ' +
   'changed and how, commands run and their outcomes, errors and how they were resolved, the ' +
-  'current state of the work, the plan or task list, and the next steps. Leave out greetings ' +
-  'and output that no longer matters. Answer with the notes only.';
+  'current state of the work, the plan or task list, and the next steps. Also keep: approaches ' +
+  'tried and ruled out, with why (so they are not tried again); what was verified (a test run, ' +
+  'an output checked) apart from what is only assumed; and changes started but not finished. ' +
+  'Leave out greetings and output that no longer matters. Answer with the notes only.';
 
 /** Tool outputs are cut harder until the transcript fits one call. */
 const PART_LIMITS = [2_000, 500, 100];

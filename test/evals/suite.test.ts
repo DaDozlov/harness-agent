@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { cp, readFile, rm } from 'node:fs/promises';
+import { cp, readdir, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createEngine } from '../../src/engine.js';
@@ -10,27 +10,41 @@ import { LocalWorkspace } from '../../src/workspace/local.js';
 
 // heaw's own eval suite (evals/README.md). A case is only worth running against a model when a
 // correct result passes it and doing nothing fails it; each case has a reference solution in
-// evals/solutions/<name>/ to show both.
+// evals/solutions/<name>/ to show both. Decoys in evals/decoys/<name>/<decoy>/ are tempting wrong
+// results (the test edited instead of the bug, a stand-in for a missing tool): each must fail
+// too, or the checks only tell a result from no result, not a right one from a wrong one.
 const SUITE = resolve('evals');
 const { items: cases, problems } = await loadEvalCases(SUITE);
 
+/** The decoys of a case: their folders, each with `about.md` saying why it is wrong. */
+async function decoysOf(name: string): Promise<Array<{ name: string; dir: string }>> {
+  const root = join(SUITE, 'decoys', name);
+  if (!existsSync(root)) return [];
+  return (await readdir(root, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => ({ name: entry.name, dir: join(root, entry.name) }));
+}
+
 /**
- * One trial with a model that only gives an answer. `solved`: the reference solution's files
- * are put into the workspace first, and its answer is the model's.
+ * One trial with a model that only gives an answer. `result`: a solution or decoy folder whose
+ * files are put into the workspace first (`delete.txt` lists paths it removes), and whose
+ * `answer.md` is the model's answer; without one, the fixture as it is and "Done.".
  */
-async function trial(evalCase: EvalCase, solved: boolean): Promise<TrialResult> {
-  const solution = join(SUITE, 'solutions', evalCase.name);
-  const files = join(solution, 'files');
-  // Paths the solution removes, one per line (a solution's files can only add or replace).
-  const deleted = existsSync(join(solution, 'delete.txt'))
-    ? (await readFile(join(solution, 'delete.txt'), 'utf8')).split('\n').filter(Boolean)
-    : [];
+async function trial(evalCase: EvalCase, result?: string): Promise<TrialResult> {
+  const files = result && join(result, 'files');
+  // Paths the result removes, one per line (its files can only add or replace).
+  const deleted =
+    result && existsSync(join(result, 'delete.txt'))
+      ? (await readFile(join(result, 'delete.txt'), 'utf8')).split('\n').filter(Boolean)
+      : [];
   const answer =
-    solved && existsSync(join(solution, 'answer.md'))
-      ? await readFile(join(solution, 'answer.md'), 'utf8')
+    result && existsSync(join(result, 'answer.md'))
+      ? await readFile(join(result, 'answer.md'), 'utf8')
       : 'Done.';
-  // What only a run with a model shows (tool calls, compaction) is not tested here.
-  const checks = evalCase.checks.filter((check) => !('called' in check || 'compactions' in check));
+  // What only a run with a model shows (tool calls, compaction, questions) is not tested here.
+  const checks = evalCase.checks.filter(
+    (check) => !('called' in check || 'compactions' in check || 'disclosed' in check),
+  );
   const report = await runEvals([{ ...evalCase, checks }], {
     model: 'scripted:test',
     trials: 1,
@@ -38,16 +52,17 @@ async function trial(evalCase: EvalCase, solved: boolean): Promise<TrialResult> 
     judge: new ScriptedModelClient([{ text: '{"pass": true, "reason": "not judged here"}' }]),
     createWorkspace: (dir) => new LocalWorkspace(dir),
     createEngine: async (workspace) => {
-      if (solved && existsSync(files)) {
+      if (files && existsSync(files)) {
         await cp(files, workspace.root, { recursive: true, force: true });
       }
-      if (solved) {
-        for (const path of deleted) {
-          await rm(join(workspace.root, path.trim()), { recursive: true, force: true });
-        }
+      for (const path of deleted) {
+        await rm(join(workspace.root, path.trim()), { recursive: true, force: true });
       }
       return createEngine({
-        model: new ScriptedModelClient([{ text: answer }]),
+        // One answer per message the case sends.
+        model: new ScriptedModelClient(
+          [evalCase.prompt, ...evalCase.followUps].map(() => ({ text: answer })),
+        ),
         workspace,
         toolsets: [],
         interactive: false,
@@ -84,12 +99,18 @@ describe("heaw's eval suite", () => {
   describe.concurrent('each case', () => {
     for (const evalCase of cases) {
       it(`${evalCase.name}: passes with its reference solution, fails with nothing done`, async () => {
-        const solved = await trial(evalCase, true);
+        const solved = await trial(evalCase, join(SUITE, 'solutions', evalCase.name));
         expect(solved.checks.filter((check) => !check.passed)).toEqual([]);
         expect(solved.passed).toBe(true);
 
-        const untouched = await trial(evalCase, false);
+        const untouched = await trial(evalCase);
         expect(untouched.passed, 'the checks pass although nothing was done').toBe(false);
+
+        for (const decoy of await decoysOf(evalCase.name)) {
+          expect(existsSync(join(decoy.dir, 'about.md')), `${decoy.name}: about.md`).toBe(true);
+          const wrong = await trial(evalCase, decoy.dir);
+          expect(wrong.passed, `the checks pass the decoy "${decoy.name}"`).toBe(false);
+        }
       }, 180_000);
     }
   });

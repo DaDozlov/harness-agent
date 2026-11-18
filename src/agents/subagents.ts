@@ -403,6 +403,7 @@ const STOPPED_EARLY: Partial<Record<StopReason, string>> = {
   time_limit: 'reached its time limit',
   max_tokens: 'hit the model output limit',
   check_failed: 'kept failing the same check',
+  check_limit: 'was sent back by the checks too often',
   content_filter: "was stopped by the provider's content filter",
   aborted: 'was interrupted',
   error: 'failed',

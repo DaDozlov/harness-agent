@@ -73,6 +73,7 @@ describe('eval cases', () => {
       source: '/project/evals/fix-add.yaml',
       fixture: resolve('/project/evals/fixtures/math'),
       prompt: 'Fix add.',
+      followUps: [],
       trials: 2,
       allow: ['run_command(node *)'],
       deny: [],
@@ -416,6 +417,151 @@ describe('running evals', () => {
       { check: 'delegate called at least 3 times', passed: false, detail: 'called 0 times' },
       { check: 'compacted at least 1 time', passed: false, detail: 'compacted 0 times' },
     ]);
+  });
+
+  it('lets a simulated user answer the questions the agent asks, and grades what it was told', async () => {
+    const root = await evalProject('');
+    const evalCase = parseEvalCase(
+      [
+        'prompt: The add function is wrong. Fix it.',
+        'fixture: ./fixtures/math',
+        'user:',
+        '  facts:',
+        '    - id: sign',
+        '      fact: add must add, not subtract.',
+        '    - id: style',
+        '      fact: Arrow functions are fine.',
+        'checks:',
+        '  - disclosed: sign',
+        '  - disclosed: style',
+      ].join('\n'),
+      join(root, 'evals', 'fix-add.yaml'),
+    );
+    const agent = new ScriptedModelClient([
+      { text: 'Should add() add its arguments, or is subtracting meant?' },
+      ...FIX,
+    ]);
+    const options = (userReplies: boolean): EngineOptions => ({
+      model: agent,
+      toolsets: ['fs'],
+      interactive: false,
+      userReplies,
+      permissions: { mode: 'accept-edits' },
+      git: false,
+      verifyChanges: false,
+    });
+
+    const report = await runEvals([evalCase], {
+      model: 'scripted:test',
+      judge: new ScriptedModelClient([
+        { text: '{"asked": true, "reply": "It must add.", "disclosed": ["sign", "made-up"]}' },
+        // The final answer asks nothing: no reply, the trial ends.
+        { text: '{"asked": false, "reply": "", "disclosed": []}' },
+      ]),
+      createWorkspace: (dir) => new LocalWorkspace(dir),
+      createEngine: (workspace) => createEngine({ ...options(true), workspace }),
+    });
+
+    const trial = report.cases[0]!.trials[0]!;
+    expect(trial.checks).toEqual([
+      { check: 'the user was asked about "sign"', passed: true },
+      {
+        check: 'the user was asked about "style"',
+        passed: false,
+        detail: 'the user told only: sign',
+      },
+    ]);
+    // The reply is the agent's next input; the trial counts both runs.
+    expect(JSON.stringify(agent.requests[1]?.messages.at(-1))).toContain('It must add.');
+    expect(trial.turns).toBe(4);
+    expect(trial.answer).toBe('Fixed: add now returns a + b.');
+    // The agent is told the user reads its answer, not that nobody can reply.
+    expect(agent.requests[0]?.system).toContain('the user reads your answer and can reply');
+    expect(agent.requests[0]?.system).not.toContain('the user cannot reply');
+    expect(parseEvalCase.bind(null, 'prompt: x\nchecks:\n  - disclosed: x', 'x.yaml')).toThrow(
+      'a disclosed check names a fact the user does not hold',
+    );
+  });
+
+  it('sends the follow-up messages of a case once each run has finished', async () => {
+    const root = await evalProject('');
+    const evalCase = parseEvalCase(
+      [
+        'prompt: The add function is wrong. Fix it.',
+        'fixture: ./fixtures/math',
+        'followUps:',
+        '  - Now say what it returns for 2 and 3.',
+        'checks:',
+        '  - answerContains: "5"',
+      ].join('\n'),
+      join(root, 'evals', 'fix-add.yaml'),
+    );
+    const agent = new ScriptedModelClient([...FIX, { text: 'add(2, 3) returns 5.' }]);
+
+    const report = await runEvals([evalCase], {
+      model: 'scripted:test',
+      judge: new ScriptedModelClient([]),
+      createWorkspace: (dir) => new LocalWorkspace(dir),
+      createEngine: (workspace) =>
+        createEngine({
+          model: agent,
+          workspace,
+          toolsets: ['fs'],
+          interactive: false,
+          permissions: { mode: 'accept-edits' },
+          git: false,
+          verifyChanges: false,
+        }),
+    });
+
+    const trial = report.cases[0]!.trials[0]!;
+    expect(trial.passed).toBe(true);
+    expect(JSON.stringify(agent.requests.at(-1)?.messages.at(-1))).toContain(
+      'Now say what it returns for 2 and 3.',
+    );
+    expect(trial.turns).toBe(4);
+  });
+
+  it('heaw eval --without switches a guard off in every trial and says so in the report', async () => {
+    const root = await evalProject(
+      [
+        'prompt: The add function is wrong. Fix it.',
+        'fixture: ./fixtures/math',
+        'checks:',
+        '  - file: math.js',
+        '    contains: a + b',
+      ].join('\n'),
+    );
+    const stdout = output();
+    const seen: Array<boolean | undefined> = [];
+    const scripts = [[], FIX];
+
+    await evalCommand(
+      undefined,
+      { without: ['unfinished-nudge', 'verify-reminder'] },
+      {
+        cwd: root,
+        env: { HEAW_HOME: join(root, 'home') },
+        stdout,
+        stderr: output(),
+        packageEntry: resolve('src/index.ts'),
+        createEngine: (options) => {
+          seen.push(options.nudgeUnfinished, options.verifyChanges);
+          return createEngine({
+            ...options,
+            model: new ScriptedModelClient(scripts.shift() ?? [], { id: 'scripted:test' }),
+          });
+        },
+      },
+    );
+
+    expect(seen.slice(-2)).toEqual([false, false]);
+    expect(stdout.text).toContain('· without unfinished-nudge, verify-reminder');
+    const reportPath = /Report: (.+)\n/.exec(stdout.text)?.[1];
+    const report = JSON.parse(await readFile(resolve(root, reportPath!), 'utf8')) as {
+      without?: string[];
+    };
+    expect(report.without).toEqual(['unfinished-nudge', 'verify-reminder']);
   });
 
   it('heaw models shows what heaw knows about the model', async () => {

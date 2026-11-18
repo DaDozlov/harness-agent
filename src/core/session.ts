@@ -159,6 +159,11 @@ export interface SessionOptions {
   remindToVerify?: boolean | undefined;
   /** How hard the model thinks, for models that reason. Default: the provider's. */
   reasoningEffort?: 'low' | 'medium' | 'high' | undefined;
+  /**
+   * Send the agent back once when its final message announces work it did not start ("Let me
+   * also…"). Default: true; `heaw eval --without unfinished-nudge` measures what it is worth.
+   */
+  nudgeUnfinished?: boolean | undefined;
 }
 
 /**
@@ -231,6 +236,8 @@ export class Session {
   readonly #startedAgents = new Map<string, number>();
   /** Told to the model with the next input, e.g. that files were rewound. */
   readonly #notes: string[] = [];
+  /** What the user wrote while a run went on, until the loop gives it to the agent. */
+  readonly #queued: string[] = [];
   readonly #intent: string | undefined;
   readonly #startedBy: string | undefined;
   readonly #trackGit: boolean;
@@ -239,6 +246,7 @@ export class Session {
   #ranCommands = false;
   readonly #stats: UsageStats;
   readonly #remindToVerify: boolean;
+  readonly #nudgeUnfinished: boolean;
   #reasoningEffort: 'low' | 'medium' | 'high' | undefined;
   /** In plan mode: the mode and effort to go back to. */
   #planSaved: { mode: PermissionMode; effort: 'low' | 'medium' | 'high' | undefined } | undefined;
@@ -301,6 +309,7 @@ export class Session {
     this.#trackGit = options.trackGit ?? false;
     this.#stats = options.stats ?? new UsageStats();
     this.#remindToVerify = options.remindToVerify ?? false;
+    this.#nudgeUnfinished = options.nudgeUnfinished ?? true;
     this.#reasoningEffort = options.reasoningEffort;
     this.#depth = options.depth ?? 0;
     this.#observe = options.observe;
@@ -439,6 +448,20 @@ export class Session {
     return this.#running;
   }
 
+  /**
+   * A message the user wrote while a run goes on. The agent gets it before its next model call,
+   * or before it would finish, so the run takes it into account; a run that ends first leaves
+   * it for `takeQueued`, to be sent as the next message.
+   */
+  queue(text: string): void {
+    this.#queued.push(text);
+  }
+
+  /** Queued messages the agent has not got yet. */
+  takeQueued(): string[] {
+    return this.#queued.splice(0);
+  }
+
   /** Plan mode: read-only except `PLAN.md`, with high reasoning effort. */
   get inPlanMode(): boolean {
     return this.#planSaved !== undefined;
@@ -554,6 +577,7 @@ export class Session {
         intent: this.#intent,
         beforeEnd: () => this.#commitLinks(base, started),
         hookEvents: this.#hookEvents,
+        takeQueued: () => this.takeQueued(),
         stopCheck: async () =>
           this.#unfinishedReminder() ?? this.#verifyReminder() ?? (await this.#planReminder()),
         reasoningEffort: () => this.#reasoningEffort,
@@ -826,7 +850,7 @@ export class Session {
 
   /** Once per run: the final message says "Let me also…" but made no call. */
   #unfinishedReminder(): string | undefined {
-    if (this.#toldUnfinished) return undefined;
+    if (!this.#nudgeUnfinished || this.#toldUnfinished) return undefined;
     const last = this.messages.at(-1);
     const text = last?.role === 'assistant' ? textOf(last).trim() : '';
     if (!announcesMoreWork(text)) return undefined;

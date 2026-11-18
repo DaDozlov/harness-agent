@@ -1,7 +1,9 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { render } from 'ink';
-import { findProjectRoot } from '../../config/project.js';
+import { findProjectRoot, heawHome } from '../../config/project.js';
+import { codeRunningFiles, isTrusted, trustProject, trustQuestion } from '../../config/trust.js';
 import type { Session } from '../../core/session.js';
 import { createEngine, type Engine } from '../../engine.js';
 import { type AgentFlags, setupEngine, userFacingMessage } from '../setup.js';
@@ -37,6 +39,19 @@ export async function startChat(
       packageEntry: context.packageEntry,
     });
   const projectRoot = findProjectRoot(process.cwd());
+  // A project's setup runs code: asked once per folder before it is loaded (docs/DESIGN.md §8).
+  const running = codeRunningFiles(projectRoot);
+  const home = heawHome(env);
+  if (running.length && !isTrusted(home, projectRoot)) {
+    const prompt = createInterface({ input: stdin, output: stdout });
+    const answer = await prompt.question(trustQuestion(projectRoot, running));
+    prompt.close();
+    if (!/^y(es)?$/i.test(answer.trim())) {
+      stderr.write('Not loaded. Read the files first, or start heaw in another folder.\n');
+      return 1;
+    }
+    trustProject(home, projectRoot);
+  }
   // Setup files changed since the last load are applied before the next message.
   const setupWatcher = await SetupWatcher.start(projectRoot);
   // `/reload`: the config files as they are now, and variables added to .env since the start.

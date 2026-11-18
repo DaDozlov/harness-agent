@@ -28,7 +28,21 @@ export interface EvalCommandOptions extends AgentFlags {
   judgeModel?: string;
   /** A report to compare this run with: a file, or `latest` for the most recent one. */
   compare?: string;
+  /** Guards to switch off in every trial (`EVAL_GUARDS`), to measure what they are worth. */
+  without?: string[];
 }
+
+/**
+ * Guards that add turns, which a run can switch off to compare with a run that has them: what
+ * they cost in turns and money against what they add to the pass rate. ECC's trials of its edit
+ * gate found 35 to 45% more turns and no established gain; a guard should show its worth.
+ */
+export const EVAL_GUARDS: Record<string, Partial<EngineOptions>> = {
+  /** Sends the agent back once when it changed files and ran nothing since. */
+  'verify-reminder': { verifyChanges: false },
+  /** Sends the agent back once when its final message announces work it did not start. */
+  'unfinished-nudge': { nudgeUnfinished: false },
+};
 
 /**
  * `heaw eval [filter]` (docs/DESIGN.md §4.16): runs the cases in `evals/`, prints a table and
@@ -97,9 +111,15 @@ export async function evalCommand(
       ? (dir: string): Workspace => new DockerWorkspace(dir)
       : setup.createWorkspace;
 
+  const without = options.without ?? [];
+  const off = Object.assign(
+    {},
+    ...without.map((name) => EVAL_GUARDS[name]),
+  ) as Partial<EngineOptions>;
   const report = await runEvals(cases, {
     model: probe.model.id,
     judge,
+    ...(without.length && { without }),
     ...(options.trials !== undefined && { trials: options.trials }),
     ...(options.keep && { keep: true }),
     onProgress: (line) => context.stderr.write(`${line}\n`),
@@ -107,7 +127,7 @@ export async function evalCommand(
     createEngine: async (workspace, evalCase) =>
       context.createEngine(
         await trialOptions(
-          { ...base, model: probe.model },
+          { ...base, ...off, model: probe.model },
           workspace,
           evalCase,
           options.mode,
@@ -215,6 +235,7 @@ async function trialOptions(
       typeof base.model !== 'string' && { model: withWindow(base.model, evalCase.contextWindow) }),
     workspace,
     interactive: false,
+    ...(evalCase.user && { userReplies: true }),
     sessionStore: undefined,
     // MCP servers act on the outside world; trials stay in their folder.
     mcp: undefined,

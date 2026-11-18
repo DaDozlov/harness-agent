@@ -13,8 +13,8 @@ import { JsonlSessionStore } from '../../sessions/jsonl-store.js';
 import type { Output } from './run.js';
 
 export interface EvalAddOptions {
-  /** The session to turn into a case, by id or a unique prefix. */
-  fromSession: string;
+  /** The session to turn into a case, by id or a unique prefix; `true` for the latest one. */
+  fromSession: string | true;
   /** `command` checks, e.g. `npm test`. */
   check?: string[];
   /** `judge` checks. */
@@ -46,7 +46,15 @@ export async function evalAddCommand(
   let records: SessionRecord[];
   try {
     const store = new JsonlSessionStore(root);
-    id = await store.resolve(options.fromSession);
+    if (options.fromSession === true) {
+      // The latest conversation (sessions a hook ran are not listed), named so a wrong one shows.
+      const [latest] = await store.list(1);
+      if (!latest) return fail('There is no saved session in this project yet.');
+      id = latest.id;
+      context.stdout.write(`From the latest session, ${id}: "${latest.title}"\n`);
+    } else {
+      id = await store.resolve(options.fromSession);
+    }
     records = await store.load(id);
   } catch (error) {
     if (error instanceof SessionNotFoundError) return fail(error.message);

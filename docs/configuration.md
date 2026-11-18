@@ -43,6 +43,7 @@ export default defineConfig({ /* settings below */ });
 | `HEAW_MODEL` | Model when the config and flags set none |
 | `HEAW_SHELL` | Shell for commands (Windows: Git Bash, else PowerShell) |
 | `HEAW_HOME` | Personal folder (default `~/.heaw`) |
+| `HEAW_BELL` | `off`: no terminal bell when an approval waits 3 s or a run of 30 s or more ends |
 | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OLLAMA_BASE_URL` | Provider credentials |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` | Traces (override `telemetry`) |
 
@@ -52,7 +53,13 @@ heaw reads `.env` from the project root.
 
 `tool` or `tool(pattern)`. Commands match with `*` (`run_command(npm *)`), paths as globs (`write_file(src/**)`), `web_fetch` by host (`web_fetch(*.python.org)`), `http_request` by method and origin, MCP tools by name (`mcp__github__get_*`).
 
+A deny or ask rule can say what to do instead, which the agent gets with the refusal: `{ rule: 'run_command(npm install*)', hint: 'This project uses pnpm: run pnpm install.' }`.
+
 Order: deny → approvals (`--allow`, "yes for the session") → protected files → ask → allow → mode. Protected files (`heaw.config.*`, `.mcp.json`, `.heaw/`, `.git/`) are always asked about.
+
+**Trusting a project.** Before the chat loads a project whose `heaw.config.*` or `.mcp.json` would run code, it asks once whether you trust the folder and remembers the answer in `~/.heaw/trusted-projects.json` (delete an entry to be asked again). `heaw init` trusts the folder it sets up; `heaw run` does not ask.
+
+**The project's checks.** Editing an existing lint or format config, a CI workflow or a pre-commit setup is asked about in `default` and `accept-edits` mode, so the agent fixes code instead of weakening the check. Creating one is not asked about; allow a file by name (`write_file(eslint.config.js)`) to let the agent edit it.
 
 **What rules cannot do.** They decide which calls run, not what a command does once it runs. Locally, an allowed command (or a test the agent wrote and then ran) runs with your rights: it can change protected files, read `.env` despite the `read_file` deny rule, and reach the network. Commands do not get heaw's API keys or variables that look like secrets (`workspace.passEnv` passes one on), but for unattended runs with commands allowed, use the Docker workspace, which confines them. An unattended run in `bypass` mode (`heaw run --mode bypass`) does so by default, unless the config sets `workspace: { type: 'local' }`.
 
@@ -76,7 +83,7 @@ A command line is checked command by command (`npm run build && npm test`, `a; b
 | `subagentStart` / `subagentEnd` | Change or block a sub-agent's task / report |
 | `sessionEnd` | Clean up, export |
 
-Every hook gets `workspace` (run checks with `workspace.exec`), the session and agent ids, the model and the run's `signal`; pass it on (`workspace.exec('npm test', { signal })`) so that Esc stops the check. `runAgent(name, task)` runs a named agent, e.g. a reviewer; Esc stops it too, and its model calls count into the run's cost and the cost limit. An interrupted run waits at most 1.5 seconds for a hook that ignores the signal. Personal hooks run before project hooks. A failing `beforeToolCall` blocks the call; other failures are reported and skipped. When `beforeStop` returns the same feedback 3 times in a row (timings aside), the run stops with `check_failed`: the agent is stuck, or the check cannot run.
+Every hook gets `workspace` (run checks with `workspace.exec`), the session and agent ids, the model and the run's `signal`; pass it on (`workspace.exec('npm test', { signal })`) so that Esc stops the check. `runAgent(name, task)` runs a named agent, e.g. a reviewer; Esc stops it too, and its model calls count into the run's cost and the cost limit. An interrupted run waits at most 1.5 seconds for a hook that ignores the signal. Personal hooks run before project hooks. A failing `beforeToolCall` blocks the call; other failures are reported and skipped. When `beforeStop` returns the same feedback 3 times in a row (timings aside), the run stops with `check_failed`: the agent is stuck, or the check cannot run. After 5 send-backs in one run, whatever they say, it stops with `check_limit`.
 
 ## Agents and skills
 

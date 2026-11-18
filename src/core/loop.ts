@@ -40,6 +40,12 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
 
 /** A `beforeStop` check that fails the same way this often in a row ends the run. */
 export const MAX_SAME_CHECK_FAILURES = 3;
+/**
+ * `beforeStop` checks may send the agent back this often in one run, findings different or not.
+ * A browser tester that found something new each round kept a run going at $0.40 a round; only
+ * the same failure three times in a row stopped it.
+ */
+export const MAX_CHECK_SEND_BACKS = 5;
 /** Tool results whose images a model that can see gets; older ones keep only their description. */
 export const IMAGES_KEPT = 3;
 
@@ -99,6 +105,8 @@ export interface LoopOptions {
   beforeEnd?: (() => Promise<EngineEventBody[]>) | undefined;
   /** Events recorded while a hook runs (agents it starts), passed on as they come. */
   hookEvents?: HookEvents | undefined;
+  /** What the user wrote while the run went on, given to the agent as it comes. */
+  takeQueued?: (() => string[]) | undefined;
 }
 
 export interface RunResult {
@@ -135,6 +143,8 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
   // The last check failure, to notice the agent going round in circles.
   let lastFailure: string | undefined;
   let sameFailures = 0;
+  // How often the checks sent the agent back in this run.
+  let sendBacks = 0;
   // Whether the agent was told that the run is near a limit.
   let warned = false;
   // The next model call thinks harder: a check failed, or the agent is going in circles.
@@ -311,6 +321,7 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
       const limit = limitReached(limits, turns, usage, costUsd);
       if (limit === 'max_turns') yield* reportAtLimit();
       if (limit) return limit;
+      yield* deliverQueued();
       turns++;
       yield stamp({ type: 'turn.start', turn: turns });
 
@@ -344,6 +355,8 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
       if (toolCalls.length === 0) {
         const reason = stopReasonFor(outcome.finishReason);
         if (reason !== 'end_turn') return reason;
+        // The user wrote something while the agent worked: it answers that before it stops.
+        if (yield* deliverQueued()) continue;
         // Verification point: a hook can send the agent back to work.
         const reminder = await options.stopCheck?.();
         if (reminder) {
@@ -373,6 +386,8 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
         lastFailure = failure;
         // Stuck, or the check cannot run here (a missing tool): only a person can help now.
         if (sameFailures >= MAX_SAME_CHECK_FAILURES) return 'check_failed';
+        // Not converging: the user sees what the checks last reported, and decides.
+        if (++sendBacks >= MAX_CHECK_SEND_BACKS) return 'check_limit';
         addMessage(userMessage(`A check before finishing reported:\n\n${verdict.feedback}`));
         thinkHarder = true;
         continue;
@@ -392,6 +407,23 @@ export async function* runLoop(options: LoopOptions): AsyncGenerator<EngineEvent
       addMessage({ role: 'tool', content: results });
       if (notes.length) addMessage(heawNote(notes.splice(0)));
     }
+  }
+
+  /**
+   * Gives the agent what the user wrote while it worked, as a message of the user's own, and
+   * tells the UI it was delivered. True when there was something.
+   */
+  function* deliverQueued(): Generator<EngineEvent, boolean> {
+    const queued = options.takeQueued?.() ?? [];
+    if (!queued.length) return false;
+    addMessage(
+      userMessage(
+        `${queued.join('\n\n')}\n\n[heaw: the user wrote this while you were working; take it ` +
+          'into account from here on.]',
+      ),
+    );
+    yield stamp({ type: 'input.delivered', count: queued.length });
+    return true;
   }
 
   /**

@@ -1,0 +1,27 @@
+description: >-
+  Two messages about one problem. First: customers were refunded twice when the payment app
+  retried a request (three incidents this quarter); the fix should stop it for good, with a test
+  that would catch it coming back. Then: payouts are retried the same way; the project's AGENTS.md
+  says logic shared by refunds and payouts lives in one helper, so that fix should reuse the first,
+  not copy it. (Without that line, two of three trials copied it: a preference nobody had stated.) A mutation probe puts the old refund code back and runs the agent's own
+  tests, which must fail then. From ECC's complex-task evals, which found one-message cases
+  saturated and moved to chained ones graded on reuse and regression tests.
+fixture: ./fixtures/payments
+prompt: >-
+  Customers were refunded twice again when the payment app retried a refund request (see
+  docs/incidents.md). Make sure a retried request does not refund again.
+followUps:
+  - Payouts to sellers are retried the same way by the payment app. Fix that too.
+limits:
+  maxTurns: 30
+  maxCostUsd: 0.6
+checks:
+  - command: npm test
+  - command: node --test acceptance/retries.test.js
+    files: ./checks/recurring-retry
+  # The agent's own tests fail when the old refund code comes back.
+  - command: node acceptance/tests-catch-it.mjs
+    files: ./checks/recurring-retry
+  # Payouts reuse the refund fix instead of a second copy of it.
+  - command: node acceptance/one-mechanism.mjs
+    files: ./checks/recurring-retry

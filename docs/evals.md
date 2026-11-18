@@ -9,8 +9,10 @@ heaw eval --docker             # each trial in a container
 heaw eval --judge-model azure:gpt-5.4
 heaw eval --compare latest     # and how each case changed since the last run
 heaw eval compare a.json b.json            # two saved reports; exit 1 if a case got worse
-heaw eval add <name> --from-session <id> --check "npm test"
+heaw eval add <name> --from-session [id] --check "npm test"   # no id: the latest conversation
 ```
+
+To see what a guard is worth, run without it and compare: `heaw eval --without verify-reminder --compare latest`. Guards: `verify-reminder` (the agent is sent back once when it changed files and ran nothing since) and `unfinished-nudge` (once when its final message announces work it did not start); repeat the flag for both. The report says which were off.
 
 Also: `--keep` (keep trial folders), `--json`, and the agent flags (`--model`, `--mode`, `--allow`, `--max-minutes`, …). Reports are saved in `.heaw/evals/`.
 
@@ -33,12 +35,14 @@ checks:
 |---|---|
 | `fixture` / `checkout` | A folder to copy, or a commit of this repository to check out (no remote, so no pushes reach yours) |
 | `prompt` | The task |
+| `followUps` | Messages sent one after another, each once the run before has finished, e.g. "payouts have the same problem" |
 | `trials` | Runs per case (default 1; use 3+ to compare) |
 | `setup` | Command before the agent starts, e.g. `npm ci` |
 | `mode`, `allow`, `limits` | Per case; mode defaults to `accept-edits` (`bypass` in Docker). `allow` also gives approvals nobody is there to give, e.g. `finish_plan` |
 | `deny` | Deny rules added for this case, e.g. a command the agent has to do without |
 | `agents: true` | The fixture's own `.heaw/agents/` join the project's, e.g. a tester with its browser server |
 | `contextWindow` | A smaller context window than the model's (at least 4,000), so a short task reaches compaction |
+| `user` | A simulated user who answers the agent's questions: `facts` (each an `id` and the `fact`) it gives only when asked about that decision, `stonewall` (its answer to anything else) and `replies` (at most this many, default 3). The agent is told the user reads its answer; approvals are still denied |
 | `checks` | All must pass, and the run must finish on its own |
 
 | Check | Passes when |
@@ -50,6 +54,7 @@ checks:
 | `maxTurns: <n>` | The run took at most `n` model turns |
 | `called: <tool>` (`atLeast: <n>`) | The tool ran successfully at least `n` times (default 1), sub-agents included; refused calls do not count, e.g. `delegate`, or a browser's screenshot tool |
 | `compactions: <n>` | The history was compacted at least `n` times, so the case really tests work across a compaction |
+| `disclosed: <id>` | The simulated user told the agent this fact: it asked the question that decides the outcome, rather than guessing |
 
 Each trial runs in a fresh temp folder with the project's config, but without MCP servers, saved sessions or the tools that look at the project itself, and with the fixture's own AGENTS.md.
 
@@ -57,6 +62,10 @@ Each trial runs in a fresh temp folder with the project's config, but without MC
 
 A case is worth its cost when a correct result passes it and a wrong one fails it:
 
+- **Write decoys**: a tempting wrong result for each likely mistake (the test edited, the tool faked), which the checks must fail. Checks that only fail when nothing was done pass a wrong result too.
+- **Put the deciding fact in the user's head** when a case is about asking: a `user` holds it and a `disclosed` check sees whether the agent asked. A one-shot case cannot test questions, and a fact in the repository can be found without asking.
+- **Chain messages** when the case is about building on earlier work: `followUps` sends the next message, and a check can see whether the second fix reuses the first. One-message cases saturate: ECC's task evals scored every arm 1.000 until they did this.
+- **Probe the agent's tests by mutation**: a check script puts the old code back (`git show HEAD:<file>`) and runs the agent's own tests, which must fail; the fixture's tests passing proves no test catches the bug coming back. Pin the reporter (`--test-reporter=tap`) and require a failing test, not only a non-zero exit, or a run that found no tests passes.
 - **Prefer `command` checks**, and keep what decides in `files`, outside the fixture. An agent that sees the test can make that test pass (edit it, or fix only the value it uses); tests it never saw check the behaviour. Use `judge` for what no command can see, with the facts in the criterion.
 - **Check what must not happen** too: `git diff --quiet HEAD -- test` (the tests are unchanged), `expectExitCode: 1` (a check that cannot pass honestly still fails).
 - **Limit turns and cost** in `limits`, so a trial that goes wrong ends. `maxTurns` as a check, with a higher limit, tells a slow success from a failure.

@@ -4,6 +4,8 @@ node_modules/
 package-lock.json
 # What the agent works on in an eval, as a project would hand it over.
 evals/fixtures/
+# Tempting wrong results of those fixtures, as an agent might leave them.
+evals/decoys/
 # Markdown is written by hand (aligned tables and diagrams); Prettier would reflow it.
 **/*.md
 # Build output in reference solutions: compared byte for byte with what the build writes

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { unknownPriceMessage } from './core/loop.js';
 import type { ModelClient } from './core/model.js';
-import { PermissionPolicy } from './core/permissions.js';
+import { PermissionPolicy, ruleText } from './core/permissions.js';
 import type { Tool } from './core/tools.js';
 import type { EngineOptions } from './engine.js';
 import { resolveModel, type Env } from './providers/registry.js';
@@ -84,7 +84,7 @@ function summary(options: EngineOptions, model: ModelClient, warnings: string[])
   const lines = [
     'The configuration loads.',
     `- Model: ${model.id}${model.capabilities.pricing ? '' : ' (price unknown: costs are not shown)'}`,
-    `- Permissions: ${rules.mode ?? 'default'} mode; allow ${list(rules.allow)}; ask ${list(rules.ask)}; deny ${list(rules.deny)}`,
+    `- Permissions: ${rules.mode ?? 'default'} mode; allow ${list(rules.allow)}; ask ${list(rules.ask?.map(ruleText))}; deny ${list(rules.deny?.map(ruleText))}`,
     `- Limits: ${limits || 'defaults (100 turns per task)'}`,
     `- Checks before finishing: ${hooks.length ? `hooks ${hooks.join(', ')}` : 'no hooks (heaw reminds the agent to verify unchecked changes)'}`,
     `- Workspace: ${workspace ? `${workspace.kind}${workspace.description ? ` (${workspace.description.split('.')[0]})` : ''}` : 'local'}`,

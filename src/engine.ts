@@ -107,7 +107,9 @@ const TOOL_GUIDANCE: Array<[line: string, needs?: 'plan' | 'commands']> = [
   [
     '- Carry a task through to the end in one go: do not stop between steps to report ' +
       'progress or to ask whether to continue. Stop early only for what only the user can ' +
-      'give: a decision, access, a missing tool.',
+      'give: a decision, access, a missing tool. What another system expects (the format of a ' +
+      'file it imports, an API it calls) is such a decision when neither the request nor the ' +
+      'project shows it: ask, rather than copy a format from other code.',
   ],
   [
     '- Check that results are right, not only that the code runs: compare outputs with what ' +
@@ -166,6 +168,12 @@ const ONE_SHOT_GUIDANCE =
   'or several steps, finish with what you did, how you verified it, and anything left undone; ' +
   'a simple question just gets its answer. Do not end with questions or offers.';
 
+const REPLIES_GUIDANCE =
+  'Actions that need approval are denied in this run, but the user reads your answer and can ' +
+  'reply. If a decision is genuinely ambiguous and neither the request nor the repository ' +
+  'settles it, ask in your answer and stop there; otherwise carry the work out and finish with ' +
+  'what you did and how you verified it.';
+
 export interface EngineOptions {
   /** A `provider:model` string such as `azure:my-deployment`, or a ready model client. */
   model: string | ModelClient;
@@ -180,6 +188,12 @@ export interface EngineOptions {
   permissions?: PermissionRules;
   /** Whether approval requests are answered (see `Session.approve`). Default: `true`. */
   interactive?: boolean;
+  /**
+   * With `interactive: false`: the user reads the answer and can reply, though nobody answers
+   * approvals, e.g. an eval case with a simulated user. The agent may then end with a question
+   * when the repository cannot settle a decision.
+   */
+  userReplies?: boolean;
   /** Limits per run: turns (default 100), tokens, cost and minutes. */
   limits?: Partial<RunLimits>;
   /** Project hooks (docs/DESIGN.md §4.11); several sets run in order. */
@@ -233,6 +247,8 @@ export interface EngineOptions {
    * to check its work. Default: true, unless a `beforeStop` hook is configured (which checks).
    */
   verifyChanges?: boolean;
+  /** See `SessionOptions.nudgeUnfinished`. Default: true. */
+  nudgeUnfinished?: boolean;
   /** How hard models that reason think. Default: the provider's (usually medium). */
   reasoningEffort?: 'low' | 'medium' | 'high';
 }
@@ -498,6 +514,15 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
             `The MCP server "${server.name}" of your agent file is ${server.status}` +
             `${server.error ? `: ${server.error}` : ''}. Its tools are missing; say so in your report.`,
         ),
+      // The project's servers too: one that stopped mid-session took its tools with it.
+      ...(mcp?.statuses() ?? [])
+        .filter((server) => server.status === 'failed' || server.status === 'needs-login')
+        .map(
+          (server) =>
+            `The MCP server "${server.name}" is ${server.status === 'failed' ? 'not available' : 'waiting for a login'}` +
+            `${server.error ? ` (${server.error})` : ''}, so its tools are missing for now. If the ` +
+            'task needs them, say so instead of working around them.',
+        ),
     ]
       .filter(Boolean)
       .join('\n\n') || undefined;
@@ -518,7 +543,9 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
             }),
           ]
         : []),
-      ...(interactive === false ? [ONE_SHOT_GUIDANCE] : []),
+      ...(interactive === false
+        ? [options.userReplies ? REPLIES_GUIDANCE : ONE_SHOT_GUIDANCE]
+        : []),
       ...(instructions ? [instructions] : []),
       ...(definition ? [definition.prompt] : []),
     ];
@@ -569,6 +596,7 @@ export async function createEngine(options: EngineOptions): Promise<Engine> {
       // An agent a hook started runs only tool hooks, and cannot start more this way.
       hooks: setup.forHook ? subagentHooks : hooks,
       ...(!setup.forHook && { runAgent: hookRunAgent, remindToVerify }),
+      ...(options.nudgeUnfinished === false && { nudgeUnfinished: false }),
       ...((definition?.reasoningEffort ?? options.reasoningEffort) && {
         reasoningEffort: definition?.reasoningEffort ?? options.reasoningEffort,
       }),

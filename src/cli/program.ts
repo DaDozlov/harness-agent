@@ -3,7 +3,12 @@ import { PERMISSION_MODES } from '../core/permissions.js';
 import { VERSION } from '../version.js';
 import { startChat, type ChatOptions } from './chat/start.js';
 import { evalAddCommand, type EvalAddOptions } from './commands/eval-add.js';
-import { evalCommand, type EvalCommandOptions, evalCompareCommand } from './commands/eval.js';
+import {
+  EVAL_GUARDS,
+  evalCommand,
+  type EvalCommandOptions,
+  evalCompareCommand,
+} from './commands/eval.js';
 import { initCommand } from './commands/init.js';
 import { modelsCommand } from './commands/models.js';
 import { sessionsCommand } from './commands/sessions.js';
@@ -122,6 +127,17 @@ export function createProgram({ packageEntry }: ProgramOptions = {}): Command {
     .option('--json', 'print the report as JSON')
     .option('--judge-model <provider:model>', 'the model that grades judge checks')
     .option('--compare <report>', 'compare with a saved report: a file, or latest')
+    .addOption(
+      new Option(
+        '--without <guard>',
+        `switch a guard off in every trial, to compare (repeatable): ${Object.keys(EVAL_GUARDS).join(', ')}`,
+      ).argParser((value: string, previous: string[] = []) => {
+        if (!(value in EVAL_GUARDS)) {
+          throw new InvalidArgumentError(`Use one of: ${Object.keys(EVAL_GUARDS).join(', ')}.`);
+        }
+        return [...previous, value];
+      }),
+    )
     .action(async (filter: string | undefined, options: EvalCommandOptions) => {
       process.exitCode = await evalCommand(filter, options, { ...defaultRunContext, packageEntry });
     });
@@ -129,7 +145,10 @@ export function createProgram({ packageEntry }: ProgramOptions = {}): Command {
     .command('add')
     .description('Turn a saved session into a regression case, starting from its commit')
     .argument('<name>', 'the case name: evals/<name>.yaml')
-    .requiredOption('--from-session <id>', 'the session, by id or a unique prefix')
+    .requiredOption(
+      '--from-session [id]',
+      'the session, by id or a unique prefix; without one, the latest conversation',
+    )
     .addOption(
       new Option('--check <command>', 'a command that must succeed, e.g. "npm test" (repeatable)')
         .argParser(collect)

@@ -5,7 +5,7 @@ import {
   planPrompt,
   runSlashCommand,
 } from '../../src/cli/chat/commands.js';
-import { failureKey, MAX_SAME_CHECK_FAILURES } from '../../src/core/loop.js';
+import { failureKey, MAX_CHECK_SEND_BACKS, MAX_SAME_CHECK_FAILURES } from '../../src/core/loop.js';
 import { announcesMoreWork } from '../../src/core/session.js';
 import { createEngine, type EngineOptions } from '../../src/engine.js';
 import { ScriptedModelClient, type ScriptedResponse } from '../../src/providers/scripted.js';
@@ -56,6 +56,32 @@ describe('a check that keeps failing the same way', () => {
     await engine.dispose();
 
     expect(events.at(-1)).toMatchObject({ type: 'run.end', stopReason: 'end_turn' });
+  });
+
+  it('stops after five send-backs in one run, though each finding is new', async () => {
+    let round = 0;
+    const { engine, model } = await engineWith(
+      Array.from({ length: 10 }, () => ({ text: 'Fixed what the tester found.' })),
+      {
+        hooks: {
+          // A browser tester that finds something else each round.
+          beforeStop: () => ({
+            continue: true,
+            feedback: `Verdict: fix first (finding ${++round})`,
+          }),
+        },
+      },
+    );
+
+    const events = await collect(engine.session().send('Polish the page'));
+    await engine.dispose();
+
+    expect(events.at(-1)).toMatchObject({ type: 'run.end', stopReason: 'check_limit' });
+    expect(model.requests).toHaveLength(MAX_CHECK_SEND_BACKS);
+    // The user sees what the checks last reported.
+    expect(events.filter((event) => event.type === 'hook').at(-1)).toMatchObject({
+      message: 'Verdict: fix first (finding 5)',
+    });
   });
 
   it('ignores timings and timestamps, not counts', () => {

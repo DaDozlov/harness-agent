@@ -221,6 +221,8 @@ const STOP_NOTES: Partial<Record<StopReason, string>> = {
   cost_limit: 'Stopped: reached the cost limit (--max-cost or limits.maxCostUsd).',
   check_failed:
     'Stopped: a check before finishing failed the same way 3 times; it needs you (fix what it reports, or the check in heaw.config.ts).',
+  check_limit:
+    'Stopped: the checks before finishing sent the agent back 5 times, each time with something new; see their last report.',
   time_limit: 'Stopped: reached the time limit (--max-minutes or limits.maxMinutes).',
   content_filter: "Stopped: the provider's content filter blocked the answer.",
   aborted: 'Stopped: interrupted.',

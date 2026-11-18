@@ -256,6 +256,63 @@ describe('PermissionPolicy rules', () => {
   );
 });
 
+describe('rules with a hint', () => {
+  it('tell the agent what to do instead when they refuse or ask', () => {
+    const policy = new PermissionPolicy({
+      mode: 'accept-edits',
+      deny: [
+        { rule: 'run_command(npm install*)', hint: 'This project uses pnpm: run pnpm install.' },
+      ],
+      ask: [{ rule: 'run_command(git push*)', hint: 'Push only to your own branch' }],
+    });
+    expect(policy.check(RUN, text('npm install lodash'))).toEqual({
+      decision: 'deny',
+      reason:
+        'it matches the deny rule "run_command(npm install*)". This project uses pnpm: run pnpm install',
+    });
+    expect(policy.check(RUN, text('git push origin main')).reason).toBe(
+      'it matches the ask rule "run_command(git push*)". Push only to your own branch',
+    );
+    expect(policy.describe().deny).toEqual(['run_command(npm install*)']);
+  });
+});
+
+describe("the project's checks", () => {
+  const existing = (value: string): Subject => ({ value, type: 'path', exists: true });
+
+  it('asks before an existing lint, format or CI config is edited, also in accept-edits mode', () => {
+    const policy = new PermissionPolicy({ mode: 'accept-edits' });
+    for (const file of ['eslint.config.js', 'web/.prettierrc', '.github/workflows/ci.yml']) {
+      const check = policy.check(WRITE, existing(file));
+      expect(check.decision, file).toBe('ask');
+      expect(check.reason).toContain("one of the project's checks");
+    }
+    // Code, and a config being created, are edited as before.
+    expect(policy.check(WRITE, existing('src/app.ts')).decision).toBe('allow');
+    expect(
+      policy.check(WRITE, { value: 'eslint.config.js', type: 'path', exists: false }),
+    ).toMatchObject({
+      decision: 'allow',
+    });
+  });
+
+  it('lets an allow rule naming it, or bypass mode, through; read-only still denies', () => {
+    expect(
+      new PermissionPolicy({ mode: 'accept-edits', allow: ['write_file(eslint.config.js)'] }).check(
+        WRITE,
+        existing('eslint.config.js'),
+      ).decision,
+    ).toBe('allow');
+    expect(
+      new PermissionPolicy({ mode: 'bypass' }).check(WRITE, existing('eslint.config.js')).decision,
+    ).toBe('allow');
+    expect(
+      new PermissionPolicy({ mode: 'read-only' }).check(WRITE, existing('eslint.config.js'))
+        .decision,
+    ).toBe('deny');
+  });
+});
+
 describe('suggestRule', () => {
   it('suggests a rule for exactly this call', () => {
     expect(suggestRule('run_command', text('npm test'))).toBe('run_command(npm test)');

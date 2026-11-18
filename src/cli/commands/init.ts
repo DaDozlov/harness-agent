@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { CONFIG_FILES, findFile } from '../../config/project.js';
+import { CONFIG_FILES, findFile, heawHome } from '../../config/project.js';
+import { trustProject } from '../../config/trust.js';
 import type { Env } from '../../providers/registry.js';
 import type { Output } from './run.js';
 
@@ -33,6 +34,8 @@ export async function initCommand(
   } else {
     const tests = await testCommand(cwd);
     await writeFile(join(cwd, 'heaw.config.ts'), configTemplate(model, tests));
+    // The user made this setup here, so the chat need not ask whether to trust it.
+    trustProject(heawHome(context.env), cwd);
     report.push(
       tests
         ? `created heaw.config.ts (the agent must pass "${tests}" before it may finish)`

@@ -11,6 +11,7 @@ import type { Workspace } from '../core/workspace.js';
 import type { Engine } from '../engine.js';
 import { stepLines } from '../observability/session-report.js';
 import type { EvalCase, EvalCheck } from './cases.js';
+import { answerAsUser } from './user.js';
 import { average, formatTable, shortCount } from './format.js';
 
 export interface CheckResult {
@@ -58,6 +59,8 @@ export interface EvalReport {
   /** Of the judge's model calls, counted apart from the agent's. */
   judgeUsage: Usage;
   durationMs: number;
+  /** Guards switched off for this run (`heaw eval --without`), so a comparison is labelled. */
+  without?: string[];
 }
 
 export interface RunEvalsOptions {
@@ -73,6 +76,8 @@ export interface RunEvalsOptions {
   trials?: number;
   /** Keep the trial folders instead of deleting them. */
   keep?: boolean;
+  /** Guards switched off in every trial, recorded in the report. */
+  without?: string[];
   onProgress?: (line: string) => void;
 }
 
@@ -122,6 +127,7 @@ export async function runEvals(cases: EvalCase[], options: RunEvalsOptions): Pro
     ...(costUsd !== undefined && { costUsd }),
     judgeUsage,
     durationMs: Date.now() - started,
+    ...(options.without?.length && { without: options.without }),
   };
 }
 
@@ -169,23 +175,56 @@ async function runTrial(
     const engine = await options.createEngine(workspace, evalCase);
     const session = engine.session();
     let end: { stopReason: StopReason; usage: Usage; turns: number; costUsd?: number } | undefined;
+    // Every run of the trial: the task, then one per reply of the simulated user.
+    let usage = emptyUsage();
+    let turns = 0;
+    let costUsd: number | undefined;
+    const disclosed = new Set<string>();
     // The run as a session log would hold it, for the trial's steps.
     const records: SessionRecord[] = [];
     try {
-      for await (const event of session.send(evalCase.prompt)) {
-        if (event.type === 'run.end' && event.agentId === session.agentId) end = event;
-        if (event.type === 'text.delta' || event.type === 'reasoning.delta') continue;
-        if (event.type !== 'message.complete') records.push({ type: 'event', event });
-        else if (event.agentId === session.agentId) {
-          records.push({ type: 'message', timestamp: event.timestamp, message: event.message });
+      let input: string | undefined = evalCase.prompt;
+      let replies = evalCase.user?.replies ?? 0;
+      const followUps = [...evalCase.followUps];
+      while (input !== undefined) {
+        end = undefined;
+        for await (const event of session.send(input)) {
+          if (event.type === 'run.end' && event.agentId === session.agentId) end = event;
+          if (event.type === 'text.delta' || event.type === 'reasoning.delta') continue;
+          if (event.type !== 'message.complete') records.push({ type: 'event', event });
+          else if (event.agentId === session.agentId) {
+            records.push({ type: 'message', timestamp: event.timestamp, message: event.message });
+          }
         }
+        if (end) {
+          usage = addUsage(usage, end.usage);
+          turns += end.turns;
+          if (end.costUsd !== undefined) costUsd = (costUsd ?? 0) + end.costUsd;
+        }
+        input = undefined;
+        // The agent finished and the user can still answer: an answer that asks gets a reply.
+        if (evalCase.user && replies > 0 && end?.stopReason === 'end_turn') {
+          const said = await answerAsUser(
+            evalCase.user,
+            evalCase.prompt,
+            lastAnswer(session.messages),
+            options.judge,
+          );
+          judgeUsage = addUsage(judgeUsage, said.usage);
+          for (const id of said.disclosed) disclosed.add(id);
+          if (said.asked && said.reply) {
+            replies--;
+            input = said.reply;
+          }
+        }
+        // The next message of the case, once the agent finished what it was asked.
+        if (input === undefined && end?.stopReason === 'end_turn') input = followUps.shift();
       }
     } finally {
       await engine.dispose();
     }
     const answer = lastAnswer(session.messages);
     const stopReason = end?.stopReason ?? 'error';
-    const turns = end?.turns ?? 0;
     // Taken before the checks run: what they add (hidden tests, build output) is not the agent's.
     const changes = await agentChanges(dir);
 
@@ -208,6 +247,7 @@ async function runTrial(
         turns,
         calls,
         compactions,
+        disclosed,
         changes,
         evalCase,
         judge: options.judge,
@@ -225,15 +265,15 @@ async function runTrial(
         passed: checks.every((check) => check.passed),
         stopReason,
         checks,
-        usage: end?.usage ?? emptyUsage(),
-        ...(end?.costUsd !== undefined && { costUsd: end.costUsd }),
+        usage,
+        ...(costUsd !== undefined && { costUsd }),
         turns,
         durationMs: Date.now() - started,
         answer,
         steps: stepLines(records) ?? [],
         ...(options.keep && { dir }),
       },
-      usage: end?.usage ?? emptyUsage(),
+      usage,
       judgeUsage,
     };
   } catch (error) {
@@ -259,6 +299,8 @@ async function runCheck(
     /** Tool calls by name, the sub-agents' included. */
     calls: ReadonlyMap<string, number>;
     compactions: number;
+    /** The facts the simulated user gave the agent. */
+    disclosed: ReadonlySet<string>;
     /** The agent's changes as a diff. */
     changes: string;
     evalCase: EvalCase;
@@ -285,6 +327,21 @@ async function runCheck(
         check: `compacted at least ${check.compactions} time${check.compactions === 1 ? '' : 's'}`,
         passed,
         ...(!passed && { detail: `compacted ${trial.compactions} times` }),
+      },
+      usage: none,
+    };
+  }
+  if ('disclosed' in check) {
+    const passed = trial.disclosed.has(check.disclosed);
+    return {
+      result: {
+        check: `the user was asked about "${check.disclosed}"`,
+        passed,
+        ...(!passed && {
+          detail: trial.disclosed.size
+            ? `the user told only: ${[...trial.disclosed].join(', ')}`
+            : 'the agent asked the user nothing that told it',
+        }),
       },
       usage: none,
     };
@@ -461,7 +518,8 @@ export function formatEvalReport(report: EvalReport): string {
   return [
     ...formatTable(header, rows),
     '',
-    `${report.passed}/${report.total} trials passed · ${report.model}${cost} · ${(report.durationMs / 1000).toFixed(1)}s`,
+    `${report.passed}/${report.total} trials passed · ${report.model}${cost} · ${(report.durationMs / 1000).toFixed(1)}s` +
+      (report.without?.length ? ` · without ${report.without.join(', ')}` : ''),
     ...(failures.length ? ['', 'Failed:', ...failures] : []),
   ].join('\n');
 }

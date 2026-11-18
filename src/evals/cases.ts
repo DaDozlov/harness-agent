@@ -24,7 +24,23 @@ export type EvalCheck =
   /** A tool ran (successfully) at least this often, the sub-agents' calls included, e.g. `delegate`. */
   | { called: string; atLeast: number }
   /** The history was compacted at least this often: the case tests work across a compaction. */
-  | { compactions: number };
+  | { compactions: number }
+  /** The simulated user told the agent this fact (`user.facts`): the agent asked about it. */
+  | { disclosed: string };
+
+/**
+ * A simulated user (docs/DESIGN.md §4.16): a model that answers the agent's questions as the
+ * person who asked for the task. It holds facts the repository does not record and tells one
+ * only when the agent asks about that decision, so a case can test whether the agent asks the
+ * question that decides the outcome, not whether it guesses.
+ */
+export interface SimulatedUser {
+  facts: Array<{ id: string; fact: string }>;
+  /** What it says to a question about something it holds no fact on, or to no question. */
+  stonewall: string;
+  /** How many times it answers in one trial. */
+  replies: number;
+}
 
 /** An eval case (docs/DESIGN.md §4.16), from `evals/<name>.yaml`. */
 export interface EvalCase {
@@ -39,6 +55,11 @@ export interface EvalCase {
    */
   checkout?: string;
   prompt: string;
+  /**
+   * Messages sent one after another once the run before has finished, e.g. "payouts have the
+   * same problem": a case can grade whether later work builds on earlier work.
+   */
+  followUps: string[];
   trials: number;
   /** Runs in the workspace before the agent, e.g. `npm ci`. */
   setup?: string;
@@ -51,6 +72,8 @@ export interface EvalCase {
   agents: boolean;
   /** A smaller context window than the model's, so a short task reaches compaction. */
   contextWindow?: number;
+  /** Someone who answers the agent's questions; without one, nobody does. */
+  user?: SimulatedUser;
   limits: { maxTurns?: number; maxCostUsd?: number; maxMinutes?: number };
   checks: EvalCheck[];
 }
@@ -65,6 +88,7 @@ const caseSchema = z
       .regex(/^[\w./~^-]+$/, 'expected a commit, tag or branch')
       .optional(),
     prompt: z.string().min(1),
+    followUps: z.array(z.string().min(1)).default([]),
     trials: z.number().int().min(1).max(100).default(1),
     setup: z.string().min(1).optional(),
     mode: z.enum(PERMISSION_MODES as [PermissionMode, ...PermissionMode[]]).optional(),
@@ -72,6 +96,16 @@ const caseSchema = z
     deny: z.array(z.string()).default([]),
     agents: z.boolean().default(false),
     contextWindow: z.number().int().min(4_000).optional(),
+    user: z
+      .object({
+        facts: z
+          .array(z.object({ id: z.string().regex(/^[\w-]+$/), fact: z.string().min(1) }).strict())
+          .min(1),
+        stonewall: z.string().min(1).default('No strong view on that one, use your judgement.'),
+        replies: z.number().int().min(1).max(10).default(3),
+      })
+      .strict()
+      .optional(),
     limits: z
       .object({
         maxTurns: z.number().int().positive().optional(),
@@ -110,6 +144,7 @@ const caseSchema = z
               })
               .strict(),
             z.object({ compactions: z.number().int().positive() }).strict(),
+            z.object({ disclosed: z.string().min(1) }).strict(),
           ]),
         )
         .min(1, 'add at least one check, or nothing can fail'),
@@ -119,7 +154,15 @@ const caseSchema = z
   .refine((data) => !(data.fixture && data.checkout), {
     message: 'use fixture or checkout, not both',
     path: ['checkout'],
-  });
+  })
+  .refine(
+    (data) =>
+      data.checks.every(
+        (check) =>
+          !('disclosed' in check) || data.user?.facts.some((fact) => fact.id === check.disclosed),
+      ),
+    { message: 'a disclosed check names a fact the user does not hold', path: ['checks'] },
+  );
 
 /**
  * The cases in `dir` (`evals/` of a project), optionally only those whose name or file name
@@ -167,6 +210,7 @@ export function parseEvalCase(text: string, source: string): EvalCase {
     ...(data.fixture && { fixture: resolve(dirname(source), data.fixture) }),
     ...(data.checkout && { checkout: data.checkout }),
     prompt: data.prompt,
+    followUps: data.followUps,
     trials: data.trials,
     ...(data.setup && { setup: data.setup }),
     ...(data.mode && { mode: data.mode }),
@@ -174,6 +218,7 @@ export function parseEvalCase(text: string, source: string): EvalCase {
     deny: data.deny,
     agents: data.agents,
     ...(data.contextWindow && { contextWindow: data.contextWindow }),
+    ...(data.user && { user: data.user }),
     limits: data.limits,
     // Like the fixture, a check's files are named relative to the case file.
     checks: data.checks.map((check) =>

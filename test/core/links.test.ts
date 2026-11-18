@@ -192,6 +192,31 @@ describe('heaw eval add', () => {
     expect(report.passed).toBe(1);
   });
 
+  it('takes the latest conversation when no session is named, and says which', async () => {
+    const { root, head } = await repo();
+    const engine = await createEngine({
+      model: new ScriptedModelClient([{ text: 'Done (badly).' }]),
+      workspace: new LocalWorkspace(root),
+      toolsets: ['fs'],
+      sessionStore: new JsonlSessionStore(root),
+    });
+    const session = engine.session();
+    await collect(session.send('Bump app.txt to v2'));
+    await engine.dispose();
+    const stdout = output();
+
+    const code = await evalAddCommand(
+      'latest',
+      { fromSession: true, check: ['grep -q v2 app.txt'] },
+      { cwd: root, stdout, stderr: output() },
+    );
+
+    expect(code).toBe(0);
+    expect(stdout.text).toContain(`From the latest session, ${session.id}: "Bump app.txt to v2"`);
+    const file = join(root, 'evals', 'latest.yaml');
+    expect(parseEvalCase(await readFile(file, 'utf8'), file)).toMatchObject({ checkout: head });
+  });
+
   it('refuses a session without a commit, and a case without checks does not load', async () => {
     const root = await tempDir();
     const engine = await createEngine({

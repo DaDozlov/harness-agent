@@ -12,11 +12,23 @@ export const PERMISSION_MODES: readonly PermissionMode[] = [
   'bypass',
 ];
 
+/**
+ * A rule, or a rule with a hint: what to do instead, added to the reason the agent gets when the
+ * rule refuses or asks, e.g. `{ rule: 'run_command(npm install*)', hint: 'This project uses
+ * pnpm: run pnpm install.' }`. A refusal that names the way works better than one that only says no.
+ */
+export type PermissionRule = string | { rule: string; hint: string };
+
+/** A rule as written, without its hint. */
+export function ruleText(rule: PermissionRule): string {
+  return typeof rule === 'string' ? rule : rule.rule;
+}
+
 export interface PermissionRules {
   mode?: PermissionMode | undefined;
   allow?: string[] | undefined;
-  ask?: string[] | undefined;
-  deny?: string[] | undefined;
+  ask?: PermissionRule[] | undefined;
+  deny?: PermissionRule[] | undefined;
   /**
    * Approved in advance for this session or run, e.g. `--allow` or `runAgent`'s `allow`. Like
    * approvals the user gives when asked, they also cover calls that ask rules would ask about.
@@ -53,7 +65,37 @@ export interface PermissionRestriction {
 export interface Subject {
   value: string;
   type: 'path' | 'text';
+  /** For a write to a path: whether the file exists already (unknown when not given). */
+  exists?: boolean | undefined;
 }
+
+/**
+ * The project's own checks: linter and formatter settings, and what runs in CI or before a
+ * commit. An agent that cannot make a check pass may weaken it instead, so editing one that
+ * exists is asked about in `default` and `accept-edits` mode; creating one is not, and an allow
+ * rule naming it, an approval or `bypass` mode lets it through (docs/DESIGN.md §4.10).
+ */
+export const CHECK_FILES: readonly string[] = [
+  '**/.eslintrc*',
+  '**/eslint.config.*',
+  '**/.eslintignore',
+  '**/.prettierrc*',
+  '**/prettier.config.*',
+  '**/.prettierignore',
+  '**/biome.json',
+  '**/biome.jsonc',
+  '**/.stylelintrc*',
+  '**/stylelint.config.*',
+  '**/.markdownlint*',
+  '**/ruff.toml',
+  '**/.ruff.toml',
+  '**/.golangci.*',
+  '**/.rubocop.yml',
+  '**/.pre-commit-config.yaml',
+  '.github/workflows/**',
+  '.gitlab-ci.yml',
+  '.husky/**',
+];
 
 export interface PermissionSummary {
   mode: PermissionMode;
@@ -95,6 +137,8 @@ export const PROTECTED_PATHS: readonly string[] = [
 
 interface Rule {
   source: string;
+  /** What to do instead, told with the reason. */
+  hint?: string;
   matchesTool: (name: string) => boolean;
   /** Absent: the rule matches every call of the tool. */
   pattern?: string;
@@ -138,7 +182,12 @@ export class PermissionPolicy {
   ): PermissionCheck {
     const commands = commandsOf(tool, subject);
     const deny = this.#deny.find((rule) => matchesAny(rule, tool.name, subject, commands));
-    if (deny) return { decision: 'deny', reason: `it matches the deny rule "${deny.source}"` };
+    if (deny) {
+      return {
+        decision: 'deny',
+        reason: `it matches the deny rule "${deny.source}"${hintOf(deny)}`,
+      };
+    }
 
     if (this.#sessionApprovals.has(approvalKey(tool.name, subject))) {
       return { decision: 'allow', reason: 'the user allowed it for this session' };
@@ -164,7 +213,8 @@ export class PermissionPolicy {
     if (tool.alwaysAsk) return { decision: 'ask', reason: 'it always needs your approval' };
 
     const ask = this.#ask.find((rule) => matchesAny(rule, tool.name, subject, commands));
-    if (ask) return { decision: 'ask', reason: `it matches the ask rule "${ask.source}"` };
+    if (ask)
+      return { decision: 'ask', reason: `it matches the ask rule "${ask.source}"${hintOf(ask)}` };
 
     const allowed = allowedEach(subject, commands, (one) => {
       const grant = this.#sessionCommands.find(
@@ -176,6 +226,15 @@ export class PermissionPolicy {
     if (allowed) return { decision: 'allow', reason: allowReason(allowed) };
 
     const decision = MODE_DEFAULTS[this.#mode][tool.kind];
+    const check = decision === 'allow' && this.#mode !== 'bypass' && projectCheck(tool, subject);
+    if (check) {
+      return {
+        decision: 'ask',
+        reason:
+          `it changes ${check}, one of the project's checks (lint, format or CI), which is asked ` +
+          'about rather than weakened to make code pass: fix the code, or say why the check is wrong',
+      };
+    }
     return {
       decision,
       reason: `${tool.kind} actions are set to "${decision}" in ${this.#mode} mode`,
@@ -391,6 +450,17 @@ function protectedPath(tool: { kind: ToolKind }, subject: Subject | undefined) {
   if (tool.kind !== 'write' || subject?.type !== 'path') return undefined;
   const nocase = process.platform === 'win32';
   const hit = PROTECTED_PATHS.some((pattern) =>
+    picomatch.isMatch(subject.value, pattern, { dot: true, nocase }),
+  );
+  return hit ? subject.value : undefined;
+}
+
+/** The project's check file an edit would change (`CHECK_FILES`), if any; creating one is free. */
+function projectCheck(tool: { kind: ToolKind }, subject: Subject | undefined) {
+  if (tool.kind !== 'write' || subject?.type !== 'path' || subject.exists === false)
+    return undefined;
+  const nocase = process.platform === 'win32';
+  const hit = CHECK_FILES.some((pattern) =>
     picomatch.isMatch(subject.value, pattern, { dot: true, nocase }),
   );
   return hit ? subject.value : undefined;
@@ -640,7 +710,9 @@ function approvalKey(toolName: string, subject: Subject | undefined): string {
   return `${toolName}\u0000${subject?.value ?? ''}`;
 }
 
-function parseRule(source: string): Rule {
+function parseRule(given: PermissionRule): Rule {
+  if (typeof given !== 'string') return { ...parseRule(given.rule), hint: given.hint };
+  const source = given;
   const match = /^([\w.*-]+)(?:\((.*)\))?$/s.exec(source.trim());
   const name = match?.[1];
   const pattern = match?.[2];
@@ -656,6 +728,10 @@ function parseRule(source: string): Rule {
     matchesTool: (toolName) => toolPattern.test(toolName),
     ...(pattern !== undefined && { pattern }),
   };
+}
+
+function hintOf(rule: Rule): string {
+  return rule.hint ? `. ${rule.hint.trim().replace(/\.$/, '')}` : '';
 }
 
 function matches(rule: Rule, toolName: string, subject: Subject | undefined): boolean {

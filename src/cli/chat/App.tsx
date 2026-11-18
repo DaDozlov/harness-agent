@@ -1,5 +1,13 @@
 import { Box, Static, Text, useApp, useWindowSize } from 'ink';
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 import type { ApprovalDecision } from '../../core/events.js';
 import type { PermissionMode } from '../../core/permissions.js';
 import type { Session } from '../../core/session.js';
@@ -28,6 +36,19 @@ import { useEditableBuffer } from './use-buffer.js';
 
 /** Shift+Tab cycles through these. Bypass is only reachable with /mode, on purpose. */
 const MODE_CYCLE: PermissionMode[] = ['default', 'accept-edits', 'read-only'];
+
+/**
+ * The terminal bell, for what waits on the user: an approval after a few seconds, the end of a
+ * long run. Terminals show it as a taskbar flash or a notification; approvals sat unanswered for
+ * minutes while the user looked elsewhere. `HEAW_BELL=off` turns it off.
+ */
+const BELL = String.fromCharCode(7);
+const APPROVAL_BELL_MS = 3_000;
+const LONG_RUN_MS = 30_000;
+function ring(): void {
+  if (process.env.HEAW_BELL === 'off' || !process.stdout.isTTY) return;
+  process.stdout.write(BELL);
+}
 
 /** Screen rows kept free below streaming text: input box, status bar and spacing. */
 const RESERVED_ROWS = 8;
@@ -96,6 +117,14 @@ function ChatApp({
     return () => clearTimeout(timer);
   }, [exitArmed]);
 
+  // An approval nobody answered after a few seconds: the user may be looking elsewhere.
+  const waiting = approvals[0]?.requestId;
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = setTimeout(ring, APPROVAL_BELL_MS);
+    return () => clearTimeout(timer);
+  }, [waiting]);
+
   // MCP servers connect in the background; redraw the status bar when one changes.
   useEffect(() => engine.onMcpChange(refresh), [engine]);
 
@@ -150,9 +179,12 @@ function ChatApp({
     }
   }, [reload, reloadEngine, setupChanges, print]);
 
+  // `send` sends what was queued as the run ended through this, not by calling itself.
+  const sendNext = useRef<(text: string) => void>(() => {});
   const send = useCallback(
     async (text: string, show = true) => {
       if (show) dispatch({ type: 'user', text });
+      const started = Date.now();
       runningRef.current = true;
       setRunning(true);
       try {
@@ -180,10 +212,18 @@ function ChatApp({
         await applySetupChanges();
         runningRef.current = false;
         setRunning(false);
+        if (Date.now() - started >= LONG_RUN_MS) ring();
+        // Written while the run ended: the next message, already shown.
+        const left = sessionRef.current.takeQueued();
+        if (left.length) sendNext.current(left.join('\n\n'));
       }
     },
     [applySetupChanges],
   );
+
+  useLayoutEffect(() => {
+    sendNext.current = (text) => void send(text, false);
+  });
 
   const commandContext = useMemo<CommandContext>(
     () => ({
@@ -224,7 +264,17 @@ function ChatApp({
     const message = text.trim();
     if (!message) return;
     if (runningRef.current) {
-      print('Wait for the current answer, or press Esc to interrupt it.', 'warning');
+      if (message.startsWith('/')) {
+        print('Commands wait until the answer is done; press Esc to interrupt it.', 'warning');
+        return;
+      }
+      // Given to the agent before its next step, or sent next if the run ends first.
+      history.current.push(message);
+      historyIndex.current = undefined;
+      input.edit(() => EMPTY_INPUT);
+      dispatch({ type: 'user', text: message });
+      sessionRef.current.queue(message);
+      print('heaw reads this before its next step.');
       return;
     }
     history.current.push(message);

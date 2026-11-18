@@ -170,6 +170,23 @@ describe('chat', () => {
     expect(app.frame()).not.toContain('keeps going and going.');
   });
 
+  it('queues a message typed while heaw works, and the agent gets it before it finishes', async () => {
+    const app = await startApp([
+      { text: 'Writing the page now, it takes a moment.', chunkSize: 2, chunkDelayMs: 30 },
+      { text: 'Done, with a footer as you asked.' },
+    ]);
+
+    await app.type('Write the page');
+    await app.press(KEYS.enter, 80);
+    await app.type('Also add a footer');
+    await app.press(KEYS.enter);
+
+    await app.waitFor('heaw reads this before its next step.');
+    await app.waitFor('Done, with a footer as you asked.');
+    expect(JSON.stringify(app.model.requests[1]?.messages.at(-1))).toContain('Also add a footer');
+    expect(app.frame()).not.toContain('Wait for the current answer');
+  });
+
   it('shows parallel sub-agents apart, each with its progress on its delegate line', async () => {
     const reads: ScriptedResponse = {
       toolCalls: ['a', 'b', 'c', 'd', 'e'].map((name) => ({
