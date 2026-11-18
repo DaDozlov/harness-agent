@@ -54,8 +54,11 @@ async function startApp(
     for (const char of text) await press(char, 5);
     await tick();
   };
+  // Up to 10 seconds: with the whole suite running, a streamed answer took twice as long as alone
+  // and was still streaming after the 2 seconds this used to wait.
   const waitFor = async (text: string) => {
-    for (let i = 0; i < 100 && !frame().includes(text); i++) await tick(20);
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline && !frame().includes(text)) await tick(20);
     expect(frame()).toContain(text);
   };
   return { ui, model, engine, session, workspace, frame, press, type, waitFor };
