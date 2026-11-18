@@ -1,6 +1,6 @@
 {
   "name": "heaw",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "A provider-agnostic, extensible agent harness for TypeScript: agent loop, tools, MCP, permissions, hooks, sub-agents and a CLI.",
   "keywords": [
     "agent",
