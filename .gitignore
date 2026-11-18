@@ -23,3 +23,5 @@ Thumbs.db
 .idea/
 .vscode/
 .claude/settings.local.json
+# A decoy's stand-in for a missing tool lives where npm looks for tools.
+!evals/decoys/missing-tool/fakes-the-tool/files/node_modules/

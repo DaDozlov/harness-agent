@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { cp, readdir, readFile, rm } from 'node:fs/promises';
+import { chmod, cp, readdir, readFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createEngine } from '../../src/engine.js';
@@ -54,6 +54,11 @@ async function trial(evalCase: EvalCase, result?: string): Promise<TrialResult> 
     createEngine: async (workspace) => {
       if (files && existsSync(files)) {
         await cp(files, workspace.root, { recursive: true, force: true });
+        // Tools a result puts where npm finds them must run; git on Windows keeps no file modes.
+        const bin = join(workspace.root, 'node_modules', '.bin');
+        if (existsSync(bin)) {
+          for (const tool of await readdir(bin)) await chmod(join(bin, tool), 0o755);
+        }
       }
       for (const path of deleted) {
         await rm(join(workspace.root, path.trim()), { recursive: true, force: true });
