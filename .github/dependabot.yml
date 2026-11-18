@@ -17,3 +17,12 @@ updates:
       minor-and-patch:
         update-types: [minor, patch]
     open-pull-requests-limit: 5
+    ignore:
+      # The types of the oldest Node heaw supports (engines: >=22.12): newer ones would let code use
+      # APIs that Node 22 lacks, and fail only for those users. Raise it with the engines field.
+      - dependency-name: '@types/node'
+        update-types: [version-update:semver-major]
+      # tsdown and typescript-eslint do not support TypeScript 7 yet (npm ERESOLVE); try again
+      # once they do, as docs/DESIGN.md says.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
